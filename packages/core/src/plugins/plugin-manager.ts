@@ -44,16 +44,20 @@ class PluginManager {
    * @param fastify Fastify instance
    */
   async enablePlugins(fastify: FastifyInstance): Promise<void> {
+    const enablePromises = [];
+
     for (const [name, metadata] of this.plugins) {
       if (metadata.enabled) {
-        try {
-          await this.enablePlugin(name, fastify);
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          fastify.log?.error(`Failed to enable plugin ${name}: ${errorMessage}`);
-        }
+        enablePromises.push(
+          this.enablePlugin(name, fastify).catch((error) => {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            fastify.log?.error(`Failed to enable plugin ${name}: ${errorMessage}`);
+          })
+        );
       }
     }
+
+    await Promise.all(enablePromises);
   }
 
   /**

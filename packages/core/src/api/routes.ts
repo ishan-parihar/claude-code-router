@@ -103,7 +103,7 @@ async function handleTransformerEndpoint(
 
 /**
  * Handle fallback logic when request fails
- * Tries each fallback model in sequence until one succeeds
+ * Tries all fallback models in parallel and returns first successful response
  */
 async function handleFallback(
   req: FastifyRequest,
@@ -124,19 +124,17 @@ async function handleFallback(
     return null;
   }
 
-  req.log.warn(`Request failed for ${(req as any).scenarioType}, trying ${fallbackList.length} fallback models`);
+  req.log.warn(`Request failed for ${(req as any).scenarioType}, trying ${fallbackList.length} fallback models in parallel`);
 
-  // Try each fallback model in sequence
-  for (const fallbackModel of fallbackList) {
+  // Try all fallback models in parallel
+  const fallbackPromises = fallbackList.map(async (fallbackModel) => {
     try {
       req.log.info(`Trying fallback model: ${fallbackModel}`);
 
-      // Update request with fallback model
       const newBody = { ...(req.body as any) };
       const [fallbackProvider, ...fallbackModelName] = fallbackModel.split(',');
       newBody.model = fallbackModelName.join(',');
 
-      // Create new request object with updated provider and body
       const newReq = {
         ...req,
         provider: fallbackProvider,
@@ -146,10 +144,9 @@ async function handleFallback(
       const provider = fastify.providerService.getProvider(fallbackProvider);
       if (!provider) {
         req.log.warn(`Fallback provider '${fallbackProvider}' not found, skipping`);
-        continue;
+        return null;
       }
 
-      // Process request transformer chain
       const { requestBody, config, bypass } = await processRequestTransformers(
         newBody,
         provider,
@@ -158,7 +155,6 @@ async function handleFallback(
         { req: newReq }
       );
 
-      // Send request to LLM provider
       const response = await sendRequestToProvider(
         requestBody,
         config,
@@ -169,7 +165,6 @@ async function handleFallback(
         { req: newReq }
       );
 
-      // Process response transformer chain
       const finalResponse = await processResponseTransformers(
         requestBody,
         response,
@@ -181,15 +176,24 @@ async function handleFallback(
 
       req.log.info(`Fallback model ${fallbackModel} succeeded`);
 
-      // Format and return response
       return formatResponse(finalResponse, reply, newBody);
     } catch (fallbackError: any) {
       req.log.warn(`Fallback model ${fallbackModel} failed: ${fallbackError.message}`);
-      continue;
+      return null;
+    }
+  });
+
+  // Wait for all fallbacks to complete and return first successful result
+  const results = await Promise.allSettled(fallbackPromises);
+
+  // Find first successful result
+  for (const result of results) {
+    if (result.status === 'fulfilled' && result.value) {
+      return result.value;
     }
   }
 
-  req.log.error(`All fallback models failed for yichu ${scenarioType}`);
+  req.log.error(`All fallback models failed for scenario ${scenarioType}`);
   return null;
 }
 
@@ -677,6 +681,137 @@ export const registerApiRoutes = async (
         message: `Provider ${
           request.body.enabled ? "enabled" : "disabled"
         } successfully`,
+      };
+    }
+  );
+
+  // Fallback configuration endpoints
+  fastify.get("/fallback", async () => {
+    const fallbackConfig = fastify.configService.get<Record<string, string[]>>("fallback");
+    return { fallback: fallbackConfig || {} };
+  });
+
+  fastify.post(
+    "/fallback",
+    {
+      schema: {
+        body: {
+          type: "object",
+          properties: {
+            scenarioType: { type: "string" },
+            models: {
+              type: "array",
+              items: { type: "string" },
+            },
+          },
+          required: ["scenarioType", "models"],
+        },
+      },
+    },
+    async (
+      request: FastifyRequest<{
+        Body: { scenarioType: string; models: string[] };
+      }>,
+      reply: FastifyReply
+    ) => {
+      const { scenarioType, models } = request.body;
+
+      if (!scenarioType?.trim()) {
+        throw createApiError(
+          "Scenario type is required",
+          400,
+          "invalid_request"
+        );
+      }
+
+      if (!Array.isArray(models) || models.length === 0) {
+        throw createApiError(
+          "At least one fallback model is required",
+          400,
+          "invalid_request"
+        );
+      }
+
+      // Validate each model format (provider,model)
+      for (const model of models) {
+        if (typeof model !== "string" || !model.includes(",")) {
+          throw createApiError(
+            `Invalid model format: ${model}. Expected format: 'provider,modelName'`,
+            400,
+            "invalid_request"
+          );
+        }
+        const [provider] = model.split(",");
+        if (!fastify.providerService.getProvider(provider)) {
+          throw createApiError(
+            `Provider '${provider}' not found for model ${model}`,
+            400,
+            "provider_not_found"
+          );
+        }
+      }
+
+      // Get existing fallback config
+      const fallbackConfig =
+        fastify.configService.get<Record<string, string[]>>("fallback") || {};
+
+      // Update fallback config
+      fallbackConfig[scenarioType] = models;
+
+      // Save to config
+      fastify.configService.set("fallback", fallbackConfig);
+
+      // Persist to file if JSON config is enabled
+      try {
+        fastify.configService.save();
+      } catch (error: any) {
+        // Log warning but don't fail the request
+        req.log.warn(`Failed to persist fallback configuration: ${error.message}`);
+      }
+
+      return {
+        message: `Fallback configuration for scenario '${scenarioType}' updated successfully`,
+        fallback: fallbackConfig,
+      };
+    }
+  );
+
+  fastify.delete(
+    "/fallback/:scenarioType",
+    {
+      schema: {
+        params: {
+          type: "object",
+          properties: { scenarioType: { type: "string" } },
+          required: ["scenarioType"],
+        },
+      },
+    },
+    async (request: FastifyRequest<{ Params: { scenarioType: string } }>) => {
+      const fallbackConfig =
+        fastify.configService.get<Record<string, string[]>>("fallback") || {};
+
+      if (!fallbackConfig[request.params.scenarioType]) {
+        throw createApiError(
+          `Fallback configuration for scenario '${request.params.scenarioType}' not found`,
+          404,
+          "fallback_not_found"
+        );
+      }
+
+      delete fallbackConfig[request.params.scenarioType];
+      fastify.configService.set("fallback", fallbackConfig);
+
+      // Persist to file if JSON config is enabled
+      try {
+        fastify.configService.save();
+      } catch (error: any) {
+        reply.log.warn(`Failed to persist fallback configuration: ${error.message}`);
+      }
+
+      return {
+        message: `Fallback configuration for scenario '${request.params.scenarioType}' deleted successfully`,
+        fallback: fallbackConfig,
       };
     }
   );

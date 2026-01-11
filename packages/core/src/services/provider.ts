@@ -14,20 +14,22 @@ export class ProviderService {
   private modelRoutes: Map<string, ModelRoute> = new Map();
 
   constructor(private readonly configService: ConfigService, private readonly transformerService: TransformerService, private readonly logger: any) {
-    this.initializeCustomProviders();
+    this.initializeCustomProviders().catch((error) => {
+      this.logger.error(`Failed to initialize providers: ${error}`);
+    });
   }
 
-  private initializeCustomProviders() {
+  private async initializeCustomProviders() {
     const providersConfig =
       this.configService.get<ConfigProvider[]>("providers");
     if (providersConfig && Array.isArray(providersConfig)) {
-      this.initializeFromProvidersArray(providersConfig);
+      await this.initializeFromProvidersArray(providersConfig);
       return;
     }
   }
 
-  private initializeFromProvidersArray(providersConfig: ConfigProvider[]) {
-    providersConfig.forEach((providerConfig: ConfigProvider) => {
+  private async initializeFromProvidersArray(providersConfig: ConfigProvider[]) {
+    const initializationPromises = providersConfig.map(async (providerConfig: ConfigProvider) => {
       try {
         if (
           !providerConfig.name ||
@@ -40,29 +42,11 @@ export class ProviderService {
         const transformer: LLMProvider["transformer"] = {}
 
         if (providerConfig.transformer) {
-          Object.keys(providerConfig.transformer).forEach(key => {
-            if (key === 'use') {
-              if (Array.isArray(providerConfig.transformer.use)) {
-                transformer.use = providerConfig.transformer.use.map((transformer) => {
-                  if (Array.isArray(transformer) && typeof transformer[0] === 'string') {
-                    const Constructor = this.transformerService.getTransformer(transformer[0]);
-                    if (Constructor) {
-                      return new (Constructor as TransformerConstructor)(transformer[1]);
-                    }
-                  }
-                  if (typeof transformer === 'string') {
-                    const transformerInstance = this.transformerService.getTransformer(transformer);
-                    if (typeof transformerInstance === 'function') {
-                      return new transformerInstance();
-                    }
-                    return transformerInstance;
-                  }
-                }).filter((transformer) => typeof transformer !== 'undefined');
-              }
-            } else {
-              if (Array.isArray(providerConfig.transformer[key]?.use)) {
-                transformer[key] = {
-                  use: providerConfig.transformer[key].use.map((transformer) => {
+          await Promise.all(
+            Object.keys(providerConfig.transformer).map(async (key) => {
+              if (key === 'use') {
+                if (Array.isArray(providerConfig.transformer.use)) {
+                  transformer.use = providerConfig.transformer.use.map((transformer) => {
                     if (Array.isArray(transformer) && typeof transformer[0] === 'string') {
                       const Constructor = this.transformerService.getTransformer(transformer[0]);
                       if (Constructor) {
@@ -76,11 +60,31 @@ export class ProviderService {
                       }
                       return transformerInstance;
                     }
-                  }).filter((transformer) => typeof transformer !== 'undefined')
+                  }).filter((transformer) => typeof transformer !== 'undefined');
+                }
+              } else {
+                if (Array.isArray(providerConfig.transformer[key]?.use)) {
+                  transformer[key] = {
+                    use: providerConfig.transformer[key].use.map((transformer) => {
+                      if (Array.isArray(transformer) && typeof transformer[0] === 'string') {
+                        const Constructor = this.transformerService.getTransformer(transformer[0]);
+                        if (Constructor) {
+                          return new (Constructor as TransformerConstructor)(transformer[1]);
+                        }
+                      }
+                      if (typeof transformer === 'string') {
+                        const transformerInstance = this.transformerService.getTransformer(transformer);
+                        if (typeof transformerInstance === 'function') {
+                          return new transformerInstance();
+                        }
+                        return transformerInstance;
+                      }
+                    }).filter((transformer) => typeof transformer !== 'undefined')
+                  }
                 }
               }
-            }
-          })
+            })
+          );
         }
 
         this.registerProvider({
@@ -94,9 +98,11 @@ export class ProviderService {
 
         this.logger.info(`${providerConfig.name} provider registered`);
       } catch (error) {
-        this.logger.error(`${providerConfig.name} provider registered error: ${error}`);
+        this.logger.error(`${providerConfig.name} provider initialization error: ${error}`);
       }
     });
+
+    await Promise.all(initializationPromises);
   }
 
   registerProvider(request: RegisterProviderRequest): LLMProvider {

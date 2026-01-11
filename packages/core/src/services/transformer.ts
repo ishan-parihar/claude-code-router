@@ -158,8 +158,19 @@ export class TransformerService {
     const transformers = this.configService.get<
       TransformerConfig["transformers"]
     >("transformers", []);
-    for (const transformer of transformers) {
-      await this.registerTransformerFromConfig(transformer);
-    }
+
+    const loadPromises = transformers.map((transformer) =>
+      this.registerTransformerFromConfig(transformer)
+    );
+
+    const results = await Promise.allSettled(loadPromises);
+
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        this.logger.error(
+          `Failed to load transformer at index ${index}: ${result.reason}`
+        );
+      }
+    });
   }
 }
