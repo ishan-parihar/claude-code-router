@@ -120,7 +120,12 @@
     "forceUseImageAgent": "强制使用图像代理",
     "selectModel": "选择一个模型...",
     "searchModel": "搜索模型...",
-    "noModelFound": "未找到模型."
+    "noModelFound": "未找到模型.",
+    "failover_config": "故障转移配置",
+    "failover_instances": "故障转移实例",
+    "failover_description": "当主模型遇到错误（HTTP 429、503、502）时，CCR 将自动切换到此列表中的下一个模型。模型按从上到下的顺序尝试。",
+    "add_failover_instance": "添加故障转移实例...",
+    "no_failover_instances": "未配置故障转移实例"
   },
   "json_editor": {
     "title": "JSON 编辑器",

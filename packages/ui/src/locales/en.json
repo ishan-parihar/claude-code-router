@@ -120,7 +120,12 @@
     "forceUseImageAgent": "Force Use Image Agent",
     "selectModel": "Select a model...",
     "searchModel": "Search model...",
-    "noModelFound": "No model found."
+    "noModelFound": "No model found.",
+    "failover_config": "Failover Configuration",
+    "failover_instances": "Failover Instances",
+    "failover_description": "When the primary model encounters errors (HTTP 429, 503, 502), CCR will automatically switch to the next model in this list. Models are tried in order from top to bottom.",
+    "add_failover_instance": "Add failover instance...",
+    "no_failover_instances": "No failover instances configured"
   },
   "json_editor": {
     "title": "JSON Editor",

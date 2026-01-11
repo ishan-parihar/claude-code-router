@@ -11,6 +11,11 @@ export interface Provider {
   transformer?: ProviderTransformer;
 }
 
+export interface FailoverInstance {
+  provider: string;
+  model: string;
+}
+
 export interface RouterConfig {
     default: string;
     background: string;
@@ -20,6 +25,7 @@ export interface RouterConfig {
     webSearch: string;
     image: string;
     custom?: any;
+    failover?: FailoverInstance[];
 }
 
 export interface Transformer {

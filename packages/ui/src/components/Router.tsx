@@ -4,6 +4,8 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { useConfig } from "./ConfigProvider";
 import { Combobox } from "./ui/combobox";
+import { FailoverConfig } from "./FailoverConfig";
+import { useState } from "react";
 
 export function Router() {
   const { t } = useTranslation();
@@ -44,6 +46,14 @@ export function Router() {
   const handleForceUseImageAgentChange = (value: boolean) => {
     setConfig({ ...config, forceUseImageAgent: value });
   };
+
+  const handleFailoverChange = (failover: any[]) => {
+    const currentRouter = config.Router || {};
+    const newRouter = { ...currentRouter, failover };
+    setConfig({ ...config, Router: newRouter });
+  };
+
+  const [showFailover, setShowFailover] = useState(false);
 
   // Handle case where config.Providers might be null or undefined
   const providers = Array.isArray(config.Providers) ? config.Providers : [];
@@ -164,6 +174,25 @@ export function Router() {
               </select>
             </div>
           </div>
+        </div>
+        
+        <div className="border-t pt-4">
+          <button
+            type="button"
+            onClick={() => setShowFailover(!showFailover)}
+            className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-gray-900"
+          >
+            {showFailover ? "▼" : "▶"} {t("router.failover_config")}
+          </button>
+          {showFailover && (
+            <div className="mt-3">
+              <FailoverConfig
+                failover={routerConfig.failover || []}
+                providers={providers}
+                onChange={handleFailoverChange}
+              />
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>
