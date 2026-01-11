@@ -96,7 +96,8 @@ export function ConfigProvider({ children }: ConfigProviderProps) {
             longContext: typeof data.Router.longContext === 'string' ? data.Router.longContext : '',
             longContextThreshold: typeof data.Router.longContextThreshold === 'number' ? data.Router.longContextThreshold : 60000,
             webSearch: typeof data.Router.webSearch === 'string' ? data.Router.webSearch : '',
-            image: typeof data.Router.image === 'string' ? data.Router.image : ''
+            image: typeof data.Router.image === 'string' ? data.Router.image : '',
+            failover: Array.isArray(data.Router.failover) ? data.Router.failover : []
           } : {
             default: '',
             background: '',
@@ -104,7 +105,8 @@ export function ConfigProvider({ children }: ConfigProviderProps) {
             longContext: '',
             longContextThreshold: 60000,
             webSearch: '',
-            image: ''
+            image: '',
+            failover: []
           },
           CUSTOM_ROUTER_PATH: typeof data.CUSTOM_ROUTER_PATH === 'string' ? data.CUSTOM_ROUTER_PATH : ''
         };
@@ -135,7 +137,8 @@ export function ConfigProvider({ children }: ConfigProviderProps) {
               longContext: '',
               longContextThreshold: 60000,
               webSearch: '',
-              image: ''
+              image: '',
+              failover: []
             },
             CUSTOM_ROUTER_PATH: ''
           });
