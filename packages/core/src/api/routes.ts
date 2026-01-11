@@ -90,8 +90,14 @@ async function handleTransformerEndpoint(
     // Format and return response
     return formatResponse(finalResponse, reply, body);
   } catch (error: any) {
-    // Handle fallback if error occurs
-    if (error.code === 'provider_response_error') {
+    // Handle fallback for rate limits (HTTP 429) and provider errors
+    const shouldFallback = 
+      error.code === 'provider_response_error' || 
+      error.statusCode === 429 || // Rate limit
+      error.statusCode === 503 || // Service unavailable
+      error.statusCode === 502;   // Bad gateway
+
+    if (shouldFallback) {
       const fallbackResult = await handleFallback(req, reply, fastify, transformer, error);
       if (fallbackResult) {
         return fallbackResult;
@@ -102,8 +108,8 @@ async function handleTransformerEndpoint(
 }
 
 /**
- * Handle fallback logic when request fails
- * Tries all fallback models in parallel and returns first successful response
+ * Handle automatic failover when request fails (rate limit, error, etc.)
+ * Automatically switches to alternative providers/models from the multi-instance configuration
  */
 async function handleFallback(
   req: FastifyRequest,
@@ -112,39 +118,70 @@ async function handleFallback(
   transformer: any,
   error: any
 ): Promise<any> {
-  const scenarioType = (req as any).scenarioType || 'default';
-  const fallbackConfig = fastify.configService.get<any>('fallback');
-
-  if (!fallbackConfig || !fallbackConfig[scenarioType]) {
+  const originalProvider = req.provider;
+  const originalModel = (req.body as any).model;
+  
+  // Get multi-instance failover configuration
+  const failoverConfig = fastify.configService.get<any>('failover');
+  
+  if (!failoverConfig) {
+    req.log.warn(`Request failed for ${originalProvider},${originalModel}, no failover configuration available`);
     return null;
   }
 
-  const fallbackList = fallbackConfig[scenarioType] as string[];
-  if (!Array.isArray(fallbackList) || fallbackList.length === 0) {
+  // Build list of alternative providers/models to try
+  const alternatives: Array<{ provider: string; model: string }> = [];
+  
+  // Add configured alternatives for this provider
+  if (failoverConfig[originalProvider]) {
+    const providerAlternatives = failoverConfig[originalProvider];
+    if (Array.isArray(providerAlternatives)) {
+      providerAlternatives.forEach((alt: any) => {
+        if (typeof alt === 'string') {
+          alternatives.push({ provider: alt, model: originalModel });
+        } else if (alt.provider && alt.model) {
+          alternatives.push({ provider: alt.provider, model: alt.model });
+        }
+      });
+    }
+  }
+
+  // Add global alternatives
+  if (failoverConfig.global && Array.isArray(failoverConfig.global)) {
+    failoverConfig.global.forEach((alt: any) => {
+      if (typeof alt === 'string') {
+        alternatives.push({ provider: alt, model: originalModel });
+      } else if (alt.provider && alt.model) {
+        alternatives.push({ provider: alt.provider, model: alt.model });
+      }
+    });
+  }
+
+  if (alternatives.length === 0) {
+    req.log.warn(`Request failed for ${originalProvider},${originalModel}, no alternatives configured`);
     return null;
   }
 
-  req.log.warn(`Request failed for ${(req as any).scenarioType}, trying ${fallbackList.length} fallback models in parallel`);
+  req.log.warn(`Request failed for ${originalProvider},${originalModel} (${error.code || error.message}), trying ${alternatives.length} alternatives`);
 
-  // Try all fallback models in parallel
-  const fallbackPromises = fallbackList.map(async (fallbackModel) => {
+  // Try alternatives sequentially until one succeeds
+  for (const alternative of alternatives) {
     try {
-      req.log.info(`Trying fallback model: ${fallbackModel}`);
+      req.log.info(`Trying alternative: ${alternative.provider},${alternative.model}`);
 
       const newBody = { ...(req.body as any) };
-      const [fallbackProvider, ...fallbackModelName] = fallbackModel.split(',');
-      newBody.model = fallbackModelName.join(',');
+      newBody.model = alternative.model;
 
       const newReq = {
         ...req,
-        provider: fallbackProvider,
+        provider: alternative.provider,
         body: newBody,
       };
 
-      const provider = fastify.providerService.getProvider(fallbackProvider);
+      const provider = fastify.providerService.getProvider(alternative.provider);
       if (!provider) {
-        req.log.warn(`Fallback provider '${fallbackProvider}' not found, skipping`);
-        return null;
+        req.log.warn(`Alternative provider '${alternative.provider}' not found, skipping`);
+        continue;
       }
 
       const { requestBody, config, bypass } = await processRequestTransformers(
@@ -174,26 +211,16 @@ async function handleFallback(
         { req: newReq }
       );
 
-      req.log.info(`Fallback model ${fallbackModel} succeeded`);
+      req.log.info(`Alternative ${alternative.provider},${alternative.model} succeeded`);
 
       return formatResponse(finalResponse, reply, newBody);
     } catch (fallbackError: any) {
-      req.log.warn(`Fallback model ${fallbackModel} failed: ${fallbackError.message}`);
-      return null;
-    }
-  });
-
-  // Wait for all fallbacks to complete and return first successful result
-  const results = await Promise.allSettled(fallbackPromises);
-
-  // Find first successful result
-  for (const result of results) {
-    if (result.status === 'fulfilled' && result.value) {
-      return result.value;
+      req.log.warn(`Alternative ${alternative.provider},${alternative.model} failed: ${fallbackError.message}`);
+      continue;
     }
   }
 
-  req.log.error(`All fallback models failed for scenario ${scenarioType}`);
+  req.log.error(`All alternatives failed for ${originalProvider},${originalModel}`);
   return null;
 }
 
@@ -685,137 +712,7 @@ export const registerApiRoutes = async (
     }
   );
 
-  // Fallback configuration endpoints
-  fastify.get("/fallback", async () => {
-    const fallbackConfig = fastify.configService.get<Record<string, string[]>>("fallback");
-    return { fallback: fallbackConfig || {} };
-  });
-
-  fastify.post(
-    "/fallback",
-    {
-      schema: {
-        body: {
-          type: "object",
-          properties: {
-            scenarioType: { type: "string" },
-            models: {
-              type: "array",
-              items: { type: "string" },
-            },
-          },
-          required: ["scenarioType", "models"],
-        },
-      },
-    },
-    async (
-      request: FastifyRequest<{
-        Body: { scenarioType: string; models: string[] };
-      }>,
-      reply: FastifyReply
-    ) => {
-      const { scenarioType, models } = request.body;
-
-      if (!scenarioType?.trim()) {
-        throw createApiError(
-          "Scenario type is required",
-          400,
-          "invalid_request"
-        );
-      }
-
-      if (!Array.isArray(models) || models.length === 0) {
-        throw createApiError(
-          "At least one fallback model is required",
-          400,
-          "invalid_request"
-        );
-      }
-
-      // Validate each model format (provider,model)
-      for (const model of models) {
-        if (typeof model !== "string" || !model.includes(",")) {
-          throw createApiError(
-            `Invalid model format: ${model}. Expected format: 'provider,modelName'`,
-            400,
-            "invalid_request"
-          );
-        }
-        const [provider] = model.split(",");
-        if (!fastify.providerService.getProvider(provider)) {
-          throw createApiError(
-            `Provider '${provider}' not found for model ${model}`,
-            400,
-            "provider_not_found"
-          );
-        }
-      }
-
-      // Get existing fallback config
-      const fallbackConfig =
-        fastify.configService.get<Record<string, string[]>>("fallback") || {};
-
-      // Update fallback config
-      fallbackConfig[scenarioType] = models;
-
-      // Save to config
-      fastify.configService.set("fallback", fallbackConfig);
-
-      // Persist to file if JSON config is enabled
-      try {
-        fastify.configService.save();
-      } catch (error: any) {
-        // Log warning but don't fail the request
-        req.log.warn(`Failed to persist fallback configuration: ${error.message}`);
-      }
-
-      return {
-        message: `Fallback configuration for scenario '${scenarioType}' updated successfully`,
-        fallback: fallbackConfig,
-      };
-    }
-  );
-
-  fastify.delete(
-    "/fallback/:scenarioType",
-    {
-      schema: {
-        params: {
-          type: "object",
-          properties: { scenarioType: { type: "string" } },
-          required: ["scenarioType"],
-        },
-      },
-    },
-    async (request: FastifyRequest<{ Params: { scenarioType: string } }>) => {
-      const fallbackConfig =
-        fastify.configService.get<Record<string, string[]>>("fallback") || {};
-
-      if (!fallbackConfig[request.params.scenarioType]) {
-        throw createApiError(
-          `Fallback configuration for scenario '${request.params.scenarioType}' not found`,
-          404,
-          "fallback_not_found"
-        );
-      }
-
-      delete fallbackConfig[request.params.scenarioType];
-      fastify.configService.set("fallback", fallbackConfig);
-
-      // Persist to file if JSON config is enabled
-      try {
-        fastify.configService.save();
-      } catch (error: any) {
-        reply.log.warn(`Failed to persist fallback configuration: ${error.message}`);
-      }
-
-      return {
-        message: `Fallback configuration for scenario '${request.params.scenarioType}' deleted successfully`,
-        fallback: fallbackConfig,
-      };
-    }
-  );
-};
+  };
 
 // Helper function
 function isValidUrl(url: string): boolean {

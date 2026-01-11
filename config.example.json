@@ -14,6 +14,17 @@
       }
     },
     {
+      "name": "iflow-backup",
+      "api_base_url": "https://api.iflow-backup.com/v1",
+      "api_key": "your-iflow-backup-api-key",
+      "models": ["glm-4.7", "glm-4.6"],
+      "headers": {
+        "User-Agent": "iFlow-Cli",
+        "X-Client-Type": "iflow-cli",
+        "X-Client-Version": "0.3.26"
+      }
+    },
+    {
       "name": "openai",
       "api_base_url": "https://api.openai.com/v1",
       "api_key": "your-openai-api-key",
@@ -29,23 +40,26 @@
       }
     }
   ],
-  "fallback": {
-    "default": [
-      "iflow,glm-4.7",
-      "openai,gpt-4",
-      "anthropic,claude-3-opus"
+  "failover": {
+    "iflow": [
+      "iflow-backup",
+      { "provider": "openai", "model": "gpt-4" },
+      { "provider": "anthropic", "model": "claude-3-opus" }
     ],
-    "think": [
-      "iflow,glm-4.6",
-      "anthropic,claude-3-opus"
+    "iflow-backup": [
+      { "provider": "iflow", "model": "glm-4.7" },
+      { "provider": "openai", "model": "gpt-4" }
     ],
-    "longContext": [
-      "anthropic,claude-3-opus",
-      "openai,gpt-4"
+    "openai": [
+      { "provider": "anthropic", "model": "claude-3-opus" },
+      { "provider": "iflow", "model": "glm-4.7" }
     ],
-    "webSearch": [
-      "iflow,glm-4.7",
-      "openai,gpt-4"
+    "anthropic": [
+      { "provider": "openai", "model": "gpt-4" },
+      { "provider": "iflow", "model": "glm-4.7" }
+    ],
+    "global": [
+      "iflow-backup"
     ]
   },
   "Router": {

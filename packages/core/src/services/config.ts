@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, writeFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { config } from "dotenv";
 import JSON5 from 'json5';
@@ -153,26 +153,6 @@ export class ConfigService {
   public reload(): void {
     this.config = {};
     this.loadConfig();
-  }
-
-  public save(): void {
-    if (!this.options.useJsonFile || !this.options.jsonPath) {
-      console.warn("JSON config not enabled, cannot save");
-      return;
-    }
-
-    const jsonPath = this.isAbsolutePath(this.options.jsonPath)
-      ? this.options.jsonPath
-      : join(process.cwd(), this.options.jsonPath);
-
-    try {
-      const jsonContent = JSON5.stringify(this.config, null, 2);
-      writeFileSync(jsonPath, jsonContent, "utf-8");
-      console.log(`Saved config to: ${jsonPath}`);
-    } catch (error) {
-      console.error(`Failed to save config to ${jsonPath}:`, error);
-      throw error;
-    }
   }
 
   public getConfigSummary(): string {
