@@ -202,6 +202,7 @@ export interface LLMProvider {
   baseUrl: string;
   apiKey: string;
   models: string[];
+  headers?: Record<string, string>;
   transformer?: {
     [key: string]: {
       use?: Transformer[];
