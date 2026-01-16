@@ -7,6 +7,7 @@ import { CLAUDE_PROJECTS_DIR, HOME_DIR } from "@CCR/shared";
 import { LRUCache } from "lru-cache";
 import { ConfigService } from "../services/config";
 import { TokenizerService } from "../services/tokenizer";
+import { ModelPoolManager } from "../services/model-pool-manager";
 
 // Types from @anthropic-ai/sdk
 interface Tool {
@@ -202,6 +203,7 @@ const getUseModel = async (
 export interface RouterContext {
   configService: ConfigService;
   tokenizerService?: TokenizerService;
+  modelPoolManager?: ModelPoolManager;
   event?: any;
 }
 
@@ -215,8 +217,58 @@ export interface RouterFallbackConfig {
   webSearch?: string[];
 }
 
+/**
+ * Build list of failover alternatives for a given provider+model
+ */
+export const buildFailoverAlternatives = (
+  configService: ConfigService,
+  provider: string,
+  model: string
+): Array<{ provider: string; model: string }> => {
+  const failoverConfig = configService.get<any>('failover');
+  const alternatives: Array<{ provider: string; model: string }> = [];
+
+  if (!failoverConfig) {
+    return alternatives;
+  }
+
+  // Add provider-specific alternatives
+  if (failoverConfig[provider]) {
+    const providerAlternatives = failoverConfig[provider];
+    if (Array.isArray(providerAlternatives)) {
+      providerAlternatives.forEach((alt: any) => {
+        if (typeof alt === 'string') {
+          alternatives.push({ provider: alt, model });
+        } else if (alt.provider && alt.model) {
+          alternatives.push({ provider: alt.provider, model: alt.model });
+        }
+      });
+    }
+  }
+
+  // Add global alternatives
+  if (failoverConfig.global && Array.isArray(failoverConfig.global)) {
+    failoverConfig.global.forEach((alt: any) => {
+      if (typeof alt === 'string') {
+        alternatives.push({ provider: alt, model });
+      } else if (alt.provider && alt.model) {
+        alternatives.push({ provider: alt.provider, model: alt.model });
+      }
+    });
+  }
+
+  return alternatives;
+};
+
 export const router = async (req: any, _res: any, context: RouterContext) => {
-  const { configService, event } = context;
+  const { configService, event, modelPoolManager } = context;
+  
+  // Extract priority from request header (set by UI)
+  const priority = req.headers['x-ccr-priority'] 
+    ? parseInt(req.headers['x-ccr-priority'] as string) 
+    : 0;
+  req.priority = priority;
+  
   // Parse sessionId from metadata.user_id
   if (req.body.metadata?.user_id) {
     const parts = req.body.metadata.user_id.split("_session_");
@@ -237,6 +289,9 @@ export const router = async (req: any, _res: any, context: RouterContext) => {
   }
 
   try {
+    // Handle custom-model identifier
+    const isCustomModel = req.body.model === "custom-model";
+    
     // Try to get tokenizer config for the current model
     const [providerName, modelName] = req.body.model.split(",");
     const tokenizerConfig = context.tokenizerService?.getTokenizerConfigForModel(
@@ -268,7 +323,18 @@ export const router = async (req: any, _res: any, context: RouterContext) => {
 
     let model;
     const customRouterPath = configService.get("CUSTOM_ROUTER_PATH");
-    if (customRouterPath) {
+    
+    if (isCustomModel) {
+      // For custom-model, use Router.default and enable failover
+      const Router = configService.get("Router");
+      if (!Router?.default) {
+        throw new Error("Router.default not configured for custom-model");
+      }
+      model = Router.default;
+      req.scenarioType = 'default';
+      req.isCustomModel = true;
+      req.log.info(`custom-model resolved to Router.default: ${model}`);
+    } else if (customRouterPath) {
       try {
         const customRouter = require(customRouterPath);
         req.tokenCount = tokenCount; // Pass token count to custom router
@@ -279,14 +345,82 @@ export const router = async (req: any, _res: any, context: RouterContext) => {
         req.log.error(`failed to load custom router: ${e.message}`);
       }
     }
+    
     if (!model) {
       const result = await getUseModel(req, tokenCount, configService, lastMessageUsage);
       model = result.model;
       req.scenarioType = result.scenarioType;
     } else {
       // Custom router doesn't provide scenario type, default to 'default'
-      req.scenarioType = 'default';
+      if (!req.scenarioType) {
+        req.scenarioType = 'default';
+      }
     }
+    
+    // Check model capacity if ModelPoolManager is available
+    if (modelPoolManager) {
+      const [selectedProvider, selectedModel] = model.split(",");
+      
+      // Check if selected model is rate-limited or has circuit breaker open
+      const isRateLimited = modelPoolManager.isRateLimited(selectedProvider, selectedModel);
+      const isCircuitOpen = modelPoolManager.isCircuitBreakerOpen(selectedProvider, selectedModel);
+      
+      if (isRateLimited) {
+        req.log.info(
+          `Primary model ${model} is rate-limited, looking for alternative`
+        );
+      } else if (isCircuitOpen) {
+        req.log.info(
+          `Primary model ${model} has circuit breaker open, looking for alternative`
+        );
+      } else if (!modelPoolManager.hasCapacity(selectedProvider, selectedModel)) {
+        req.log.info(
+          `Primary model ${model} at capacity, looking for alternative`
+        );
+      }
+      
+      // Only apply failover for custom-model (default scenario)
+      // Other scenarios (think, longContext, background, webSearch) do not use failover
+      if (req.isCustomModel && (isRateLimited || isCircuitOpen || !modelPoolManager.hasCapacity(selectedProvider, selectedModel))) {
+        const alternatives = buildFailoverAlternatives(
+          configService,
+          selectedProvider,
+          selectedModel
+        );
+        
+        // Filter out rate-limited and circuit-open alternatives
+        const availableAlternatives = modelPoolManager.getAvailableAlternatives(alternatives, priority);
+        
+        if (availableAlternatives.length > 0) {
+          // Use first available alternative (could be improved with priority-based selection)
+          const availableModel = `${availableAlternatives[0].provider},${availableAlternatives[0].model}`;
+          req.log.info(
+            `Using alternative model ${availableModel} instead of ${model} ` +
+            `(filtered from ${alternatives.length} total alternatives)`
+          );
+          model = availableModel;
+          // Update scenario type based on new model
+          const [newProvider, newModel] = availableModel.split(",");
+          req.provider = newProvider;
+        } else {
+          // No available alternative, request will be queued
+          req.log.info(
+            `All models unavailable (rate-limited, circuit-open, or at capacity), ` +
+            `request will be queued for ${model}`
+          );
+          req.needsQueue = true;
+          req.queueModel = model;
+        }
+      } else if (!req.isCustomModel && (isRateLimited || isCircuitOpen || !modelPoolManager.hasCapacity(selectedProvider, selectedModel))) {
+        // For non-custom-model scenarios, just queue without failover
+        req.log.info(
+          `Model ${model} unavailable for scenario '${req.scenarioType}', request will be queued`
+        );
+        req.needsQueue = true;
+        req.queueModel = model;
+      }
+    }
+    
     req.body.model = model;
   } catch (error: any) {
     req.log.error(`Error in router middleware: ${error.message}`);

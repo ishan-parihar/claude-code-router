@@ -47,10 +47,8 @@ export function Router() {
     setConfig({ ...config, forceUseImageAgent: value });
   };
 
-  const handleFailoverChange = (failover: any[]) => {
-    const currentRouter = config.Router || {};
-    const newRouter = { ...currentRouter, failover };
-    setConfig({ ...config, Router: newRouter });
+  const handleFailoverChange = (failover: Record<string, (string | { provider: string; model: string })[]>) => {
+    setConfig({ ...config, failover });
   };
 
   const [showFailover, setShowFailover] = useState(false);
@@ -187,8 +185,9 @@ export function Router() {
           {showFailover && (
             <div className="mt-3">
               <FailoverConfig
-                failover={routerConfig.failover || []}
+                failover={config.failover || {}}
                 providers={providers}
+                defaultModel={routerConfig.default || ""}
                 onChange={handleFailoverChange}
               />
             </div>

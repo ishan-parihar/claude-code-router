@@ -31,6 +31,7 @@ import { registerApiRoutes } from "./api/routes";
 import { ProviderService } from "./services/provider";
 import { TransformerService } from "./services/transformer";
 import { TokenizerService } from "./services/tokenizer";
+import { ModelPoolManager } from "./services/model-pool-manager";
 import { router, calculateTokenCount, searchProjectBySession } from "./utils/router";
 import { sessionUsageCache } from "./utils/cache";
 
@@ -40,6 +41,12 @@ declare module "fastify" {
     provider?: string;
     model?: string;
     scenarioType?: string;
+    isCustomModel?: boolean;
+    priority?: number;
+    needsQueue?: boolean;
+    queueModel?: string;
+    sessionId?: string;
+    resolvedModel?: string;
   }
   interface FastifyInstance {
     _server?: Server;
@@ -72,6 +79,7 @@ class Server {
   providerService!: ProviderService;
   transformerService: TransformerService;
   tokenizerService: TokenizerService;
+  modelPoolManager: ModelPoolManager;
 
   constructor(options: ServerOptions = {}) {
     const { initialConfig, ...fastifyOptions } = options;
@@ -88,6 +96,7 @@ class Server {
       this.configService,
       this.app.log
     );
+    this.modelPoolManager = new ModelPoolManager(this.configService, this.app.log);
     this.transformerService.initialize().finally(() => {
       this.providerService = new ProviderService(
         this.configService,
@@ -140,6 +149,7 @@ class Server {
         fastify.decorate('transformerService', this.transformerService);
         fastify.decorate('providerService', this.providerService);
         fastify.decorate('tokenizerService', this.tokenizerService);
+        fastify.decorate('modelPoolManager', this.modelPoolManager);
         // Add router hook for main namespace
         fastify.addHook('preHandler', async (req: any, reply: any) => {
           const url = new URL(`http://127.0.0.1${req.url}`);
@@ -147,6 +157,7 @@ class Server {
             await router(req, reply, {
               configService: this.configService,
               tokenizerService: this.tokenizerService,
+              modelPoolManager: this.modelPoolManager,
             });
           }
         });
@@ -176,11 +187,13 @@ class Server {
       this.app.log
     );
     await tokenizerService.initialize();
+    const modelPoolManager = new ModelPoolManager(configService, this.app.log);
     await this.app.register(async (fastify) => {
       fastify.decorate('configService', configService);
       fastify.decorate('transformerService', transformerService);
       fastify.decorate('providerService', providerService);
       fastify.decorate('tokenizerService', tokenizerService);
+      fastify.decorate('modelPoolManager', modelPoolManager);
       // Add router hook for namespace
       fastify.addHook('preHandler', async (req: any, reply: any) => {
         const url = new URL(`http://127.0.0.1${req.url}`);
@@ -188,6 +201,7 @@ class Server {
           await router(req, reply, {
             configService,
             tokenizerService,
+            modelPoolManager,
           });
         }
       });
@@ -225,6 +239,14 @@ class Server {
                   .code(400)
                   .send({ error: "Missing model in request body" });
               }
+              
+              if (body.model === "custom-model") {
+                req.provider = "custom-model";
+                req.model = "custom-model";
+                req.body.model = "custom-model";
+                return;
+              }
+              
               const [provider, ...model] = body.model.split(",");
               body.model = model.join(",");
               req.provider = provider;

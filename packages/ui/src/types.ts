@@ -25,7 +25,6 @@ export interface RouterConfig {
     webSearch: string;
     image: string;
     custom?: any;
-    failover?: FailoverInstance[];
 }
 
 export interface Transformer {
@@ -61,6 +60,7 @@ export interface Config {
   transformers: Transformer[];
   StatusLine?: StatusLineConfig;
   forceUseImageAgent?: boolean;
+  failover?: Record<string, (string | { provider: string; model: string })[]>;
   // Top-level settings
   LOG: boolean;
   LOG_LEVEL: string;

@@ -1,0 +1,65 @@
+{
+  "PORT": 3456,
+  "HOST": "127.0.0.1",
+  "LOG": true,
+  "providers": [
+    {
+      "name": "iflow",
+      "api_base_url": "https://api.iflow.com/v1",
+      "api_key": "test-key",
+      "models": ["glm-4.7", "glm-4.6"],
+      "headers": {
+        "User-Agent": "iFlow-Cli",
+        "X-Client-Type": "iflow-cli",
+        "X-Client-Version": "0.3.26"
+      }
+    },
+    {
+      "name": "iflow-backup",
+      "api_base_url": "https://api.iflow-backup.com/v1",
+      "api_key": "test-key-backup",
+      "models": ["glm-4.7", "glm-4.6"],
+      "headers": {
+        "User-Agent": "iFlow-Cli",
+        "X-Client-Type": "iflow-cli",
+        "X-Client-Version": "0.3.26"
+      }
+    }
+  ],
+  "failover": {
+    "iflow": ["iflow-backup"],
+    "iflow-backup": ["iflow"]
+  },
+  "modelPool": {
+    "maxConcurrentPerModel": 2,
+    "circuitBreaker": {
+      "failureThreshold": 5,
+      "cooldownPeriod": 60000,
+      "testRequestAfterCooldown": true
+    },
+    "rateLimit": {
+      "defaultRetryAfter": 60000,
+      "respectRetryAfterHeader": true,
+      "backoffMultiplier": 1.5,
+      "maxBackoff": 300000
+    },
+    "queue": {
+      "maxQueueSize": 100,
+      "queueTimeout": 300000,
+      "priorityLevels": {
+        "high": 10,
+        "normal": 0,
+        "low": -10
+      },
+      "skipRateLimited": true
+    },
+    "priorityFailover": true
+  },
+  "Router": {
+    "default": "iflow,glm-4.7",
+    "think": "iflow,glm-4.6",
+    "longContext": "iflow,glm-4.7",
+    "background": "iflow,glm-4.6",
+    "webSearch": "iflow,glm-4.7"
+  }
+}

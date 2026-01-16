@@ -123,7 +123,7 @@
     "noModelFound": "No model found.",
     "failover_config": "Failover Configuration",
     "failover_instances": "Failover Instances",
-    "failover_description": "When the primary model encounters errors (HTTP 429, 503, 502), CCR will automatically switch to the next model in this list. Models are tried in order from top to bottom.",
+    "failover_description": "Configure failover providers for when the primary model is rate-limited or unavailable. Failover is only enabled for custom-model (default scenario).",
     "add_failover_instance": "Add failover instance...",
     "no_failover_instances": "No failover instances configured"
   },

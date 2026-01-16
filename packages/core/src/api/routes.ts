@@ -12,6 +12,7 @@ import { ConfigService } from "@/services/config";
 import { ProviderService } from "@/services/provider";
 import { TransformerService } from "@/services/transformer";
 import { Transformer } from "@/types/transformer";
+import { ModelPoolManager } from "@/services/model-pool-manager";
 
 // Extend FastifyInstance to include custom services
 declare module "fastify" {
@@ -19,10 +20,19 @@ declare module "fastify" {
     configService: ConfigService;
     providerService: ProviderService;
     transformerService: TransformerService;
+    modelPoolManager: ModelPoolManager;
   }
 
   interface FastifyRequest {
     provider?: string;
+    model?: string;
+    priority?: number;
+    needsQueue?: boolean;
+    queueModel?: string;
+    isCustomModel?: boolean;
+    scenarioType?: string;
+    sessionId?: string;
+    resolvedModel?: string;
   }
 }
 
@@ -48,6 +58,101 @@ async function handleTransformerEndpoint(
       404,
       "provider_not_found"
     );
+  }
+
+  // Try to reserve a slot BEFORE any processing
+  // This ensures we don't accept requests we can't handle
+  let slotReserved = false;
+  let reservedModel: string | null = null;
+  
+  if (fastify.modelPoolManager) {
+    const [pName, mName] = body.model.split(',');
+    slotReserved = fastify.modelPoolManager.reserveSlot(pName, mName);
+    
+    if (!slotReserved) {
+      // Slot not available, try to queue
+      const [queueProvider, queueModel] = body.model.split(',');
+      
+      // Check if we can queue (respect maxQueueSize)
+      const status = fastify.modelPoolManager.getStatus();
+      const slotKey = `${queueProvider},${queueModel}`;
+      const currentQueueSize = status[slotKey]?.queuedRequests || 0;
+      const maxQueueSize = fastify.modelPoolManager.getConfig().queue.maxQueueSize;
+      
+      if (currentQueueSize < maxQueueSize) {
+        req.log.info(`Request queued for ${queueProvider},${queueModel}`);
+        
+        try {
+          // Reserve a slot specifically for this queued request
+          const queueSlotReserved = fastify.modelPoolManager.reserveSlot(queueProvider, queueModel);
+          
+          if (queueSlotReserved) {
+            await fastify.modelPoolManager.enqueueRequest(
+              queueProvider,
+              queueModel,
+              req,
+              reply,
+              transformer,
+              req.priority || 0
+            );
+            
+            // The slot is now being held via reservedForQueue, release the reservation
+            fastify.modelPoolManager.releaseReservation(queueProvider, queueModel);
+            
+            // After queue processing, update provider and model
+            req.provider = queueProvider;
+            body.model = req.queueModel || body.model;
+            
+            // Re-check if the model changed during queue processing
+            const [newProvider, newModel] = body.model.split(',');
+            
+            // Try to reserve the slot again for the actual request
+            slotReserved = fastify.modelPoolManager.reserveSlot(newProvider, newModel);
+            if (slotReserved) {
+              reservedModel = body.model;
+            } else {
+              // Still no slot, re-enqueue
+              req.needsQueue = true;
+              req.queueModel = body.model;
+              const requeueSlotReserved = fastify.modelPoolManager.reserveSlot(newProvider, newModel);
+              if (requeueSlotReserved) {
+                fastify.modelPoolManager.releaseReservation(newProvider, newModel);
+                await fastify.modelPoolManager.enqueueRequest(
+                  newProvider,
+                  newModel,
+                  req,
+                  reply,
+                  transformer,
+                  req.priority || 0
+                );
+              }
+            }
+          } else {
+            // Cannot reserve and cannot queue, reject
+            throw createApiError(
+              `No capacity for ${queueProvider},${queueModel} (queue full)`,
+              503,
+              "no_capacity"
+            );
+          }
+        } catch (queueError: any) {
+          req.log.error(`Queue error: ${queueError.message}`);
+          throw createApiError(
+            `Queue error: ${queueError.message}`,
+            503,
+            "queue_error"
+          );
+        }
+      } else {
+        throw createApiError(
+          `Queue full for ${queueProvider},${queueModel}`,
+          503,
+          "queue_full"
+        );
+      }
+    } else {
+      reservedModel = body.model;
+    }
   }
 
   try {
@@ -90,36 +195,78 @@ async function handleTransformerEndpoint(
     // Format and return response
     return formatResponse(finalResponse, reply, body);
   } catch (error: any) {
-    // Handle fallback for rate limits (HTTP 429) and provider errors
+    // Track rate limit if applicable
+    if (fastify.modelPoolManager && (error.statusCode === 429 || error.statusCode === 449)) {
+      const [providerName, modelName] = body.model.split(',');
+      const retryAfter = error.headers?.['retry-after'] 
+        ? parseInt(error.headers['retry-after']) * 1000
+        : 60000; // Default 60s
+      fastify.modelPoolManager.markRateLimit(
+        providerName,
+        modelName,
+        retryAfter
+      );
+    }
+
+    // Handle fallback for rate limits (HTTP 429, 449) and provider errors
     const shouldFallback = 
       error.code === 'provider_response_error' || 
-      error.statusCode === 429 || // Rate limit
+      error.statusCode === 429 || // Rate limit (standard)
+      error.statusCode === 449 || // Rate limit (Microsoft/Windows)
       error.statusCode === 503 || // Service unavailable
       error.statusCode === 502;   // Bad gateway
 
     if (shouldFallback) {
-      const fallbackResult = await handleFallback(req, reply, fastify, transformer, error);
+      const fallbackResult = await handleFallback(req, reply, fastify, transformer, error, 'error');
       if (fallbackResult) {
         return fallbackResult;
       }
     }
+    
+    // Mark failure before throwing
+    if (fastify.modelPoolManager) {
+      const [providerName, modelName] = body.model.split(',');
+      fastify.modelPoolManager.markFailure(providerName, modelName);
+    }
+    
     throw error;
+  } finally {
+    // Release slot if acquired
+    if (slotReserved && fastify.modelPoolManager) {
+      const [providerName, modelName] = (reservedModel || body.model).split(',');
+      fastify.modelPoolManager.releaseSlot(providerName, modelName, true);
+    }
   }
 }
 
 /**
  * Handle automatic failover when request fails (rate limit, error, etc.)
  * Automatically switches to alternative providers/models from the multi-instance configuration
+ * Supports parallel execution of alternatives for faster failover
+ * Only applies failover for custom-model (default scenario) - other scenarios do not use failover
  */
 async function handleFallback(
   req: FastifyRequest,
   reply: FastifyReply,
   fastify: FastifyInstance,
   transformer: any,
-  error: any
+  error: any,
+  reason: 'error' | 'capacity' = 'error'
 ): Promise<any> {
   const originalProvider = req.provider;
   const originalModel = (req.body as any).model;
+  
+  // Only apply failover for custom-model (default scenario)
+  // Other scenarios (think, longContext, background, webSearch) should not use failover
+  const isCustomModel = req.isCustomModel === true || originalProvider === "custom-model";
+  
+  if (!isCustomModel) {
+    req.log.warn(
+      `Request failed for ${originalProvider},${originalModel} (scenario: ${req.scenarioType}), ` +
+      `failover not enabled for this scenario`
+    );
+    return null;
+  }
   
   // Get multi-instance failover configuration
   const failoverConfig = fastify.configService.get<any>('failover');
@@ -133,7 +280,7 @@ async function handleFallback(
   const alternatives: Array<{ provider: string; model: string }> = [];
   
   // Add configured alternatives for this provider
-  if (failoverConfig[originalProvider]) {
+  if (originalProvider && failoverConfig[originalProvider]) {
     const providerAlternatives = failoverConfig[originalProvider];
     if (Array.isArray(providerAlternatives)) {
       providerAlternatives.forEach((alt: any) => {
@@ -162,11 +309,95 @@ async function handleFallback(
     return null;
   }
 
-  req.log.warn(`Request failed for ${originalProvider},${originalModel} (${error.code || error.message}), trying ${alternatives.length} alternatives`);
+  // Filter out rate-limited and circuit-open alternatives
+  const availableAlternatives = alternatives.filter(alt => {
+    if (fastify.modelPoolManager) {
+      const isRateLimited = fastify.modelPoolManager.isRateLimited(alt.provider, alt.model);
+      const isCircuitOpen = fastify.modelPoolManager.isCircuitBreakerOpen(alt.provider, alt.model);
+      
+      if (isRateLimited || isCircuitOpen) {
+        req.log.debug(
+          `Skipping alternative ${alt.provider},${alt.model} ` +
+          `(rate-limited: ${isRateLimited}, circuit-open: ${isCircuitOpen})`
+        );
+        return false;
+      }
+    }
+    return true;
+  });
 
-  // Try alternatives sequentially until one succeeds
-  for (const alternative of alternatives) {
+  if (availableAlternatives.length === 0) {
+    req.log.warn(`Request failed for ${originalProvider},${originalModel}, no available alternatives (all rate-limited or circuit-open)`);
+    return null;
+  }
+
+  req.log.warn(
+    `Request ${reason === 'capacity' ? 'at capacity' : 'failed'} for ${originalProvider},${originalModel} ` +
+    `(${error.code || error.message}), trying ${availableAlternatives.length} available alternatives in parallel ` +
+    `(filtered from ${alternatives.length} total)`
+  );
+
+  // Use parallel execution for faster failover
+  try {
+    const result = await tryAlternativesParallel(
+      availableAlternatives,
+      req,
+      reply,
+      fastify,
+      transformer,
+      reason
+    );
+    
+    if (result) {
+      return result;
+    }
+  } catch (parallelError: any) {
+    req.log.error(`Parallel failover failed: ${parallelError.message}`);
+  }
+
+  req.log.error(`All alternatives failed for ${originalProvider},${originalModel}`);
+  return null;
+}
+
+/**
+ * Try multiple alternatives in parallel, return first successful response
+ */
+async function tryAlternativesParallel(
+  alternatives: Array<{ provider: string; model: string }>,
+  req: FastifyRequest,
+  reply: FastifyReply,
+  fastify: FastifyInstance,
+  transformer: any,
+  reason: 'error' | 'capacity'
+): Promise<any> {
+  // Create AbortController for canceling slower requests
+  const controller = new AbortController();
+  
+  // Try all alternatives in parallel
+  const promises = alternatives.map(async (alternative) => {
+    let slotReserved = false;
+    
     try {
+      const provider = fastify.providerService.getProvider(alternative.provider);
+      if (!provider) {
+        return { success: false, provider: alternative.provider, model: alternative.model, reason: 'provider_not_found' };
+      }
+      
+      // Reserve slot if ModelPoolManager is available
+      if (fastify.modelPoolManager) {
+        slotReserved = fastify.modelPoolManager.reserveSlot(
+          alternative.provider,
+          alternative.model
+        );
+        
+        if (!slotReserved) {
+          return { success: false, provider: alternative.provider, model: alternative.model, reason: 'no_capacity' };
+        }
+        
+        // Confirm the reservation - convert from reserved to active
+        fastify.modelPoolManager.confirmSlot(alternative.provider, alternative.model);
+      }
+      
       req.log.info(`Trying alternative: ${alternative.provider},${alternative.model}`);
 
       const newBody = { ...(req.body as any) };
@@ -178,18 +409,12 @@ async function handleFallback(
         body: newBody,
       };
 
-      const provider = fastify.providerService.getProvider(alternative.provider);
-      if (!provider) {
-        req.log.warn(`Alternative provider '${alternative.provider}' not found, skipping`);
-        continue;
-      }
-
       const { requestBody, config, bypass } = await processRequestTransformers(
         newBody,
         provider,
         transformer,
         req.headers,
-        { req: newReq }
+        { req: newReq, signal: controller.signal }
       );
 
       const response = await sendRequestToProvider(
@@ -199,7 +424,7 @@ async function handleFallback(
         fastify,
         bypass,
         transformer,
-        { req: newReq }
+        { req: newReq, signal: controller.signal }
       );
 
       const finalResponse = await processResponseTransformers(
@@ -211,17 +436,62 @@ async function handleFallback(
         { req: newReq }
       );
 
+      // Success - mark success and cancel other requests
+      if (fastify.modelPoolManager) {
+        fastify.modelPoolManager.markSuccess(alternative.provider, alternative.model);
+        fastify.modelPoolManager.releaseSlot(alternative.provider, alternative.model, true);
+      }
+      
+      controller.abort();
+      
       req.log.info(`Alternative ${alternative.provider},${alternative.model} succeeded`);
-
-      return formatResponse(finalResponse, reply, newBody);
+      
+      return { 
+        success: true, 
+        provider: alternative.provider, 
+        model: alternative.model, 
+        result: formatResponse(finalResponse, reply, newBody) 
+      };
     } catch (fallbackError: any) {
+      // Mark failure
+      if (fastify.modelPoolManager) {
+        fastify.modelPoolManager.markFailure(alternative.provider, alternative.model);
+        
+        // Check if rate limited - mark immediately
+        if (fallbackError.statusCode === 429 || fallbackError.statusCode === 449) {
+          const retryAfter = fallbackError.headers?.['retry-after'] 
+            ? parseInt(fallbackError.headers['retry-after']) * 1000
+            : undefined; // Let exponential backoff handle it
+          fastify.modelPoolManager.markRateLimit(
+            alternative.provider,
+            alternative.model,
+            retryAfter
+          );
+        }
+        
+        // Release slot if reserved
+        if (slotReserved) {
+          fastify.modelPoolManager.releaseSlot(alternative.provider, alternative.model, false);
+        }
+      }
+      
       req.log.warn(`Alternative ${alternative.provider},${alternative.model} failed: ${fallbackError.message}`);
-      continue;
+      return { success: false, provider: alternative.provider, model: alternative.model, error: fallbackError };
+    }
+  });
+  
+  // Wait for first success or all failures
+  const results = await Promise.allSettled(promises);
+  
+  // Find first successful result
+  for (const result of results) {
+    if (result.status === 'fulfilled' && result.value?.success) {
+      return result.value.result;
     }
   }
-
-  req.log.error(`All alternatives failed for ${originalProvider},${originalModel}`);
-  return null;
+  
+  // All failed
+  throw new Error('All alternatives failed');
 }
 
 /**
@@ -711,6 +981,77 @@ export const registerApiRoutes = async (
       };
     }
   );
+
+  // Models endpoint - lists available models including custom-model
+  fastify.get("/v1/models", async () => {
+    const providers = fastify.providerService.getProviders();
+    const models = [];
+    
+    // Add custom-model as first option with special description
+    models.push({
+      id: "custom-model",
+      object: "model",
+      owned_by: "claude-code-router",
+      description: "Automatic model routing using Router.default with intelligent failover",
+      capabilities: {
+        automatic_routing: true,
+        failover: true,
+        parallel_execution: true
+      }
+    });
+    
+    // Add all provider models
+    providers.forEach((provider) => {
+      provider.models.forEach((model) => {
+        models.push({
+          id: model,
+          object: "model",
+          owned_by: provider.name,
+          provider: provider.name
+        });
+        models.push({
+          id: `${provider.name},${model}`,
+          object: "model",
+          owned_by: provider.name,
+          provider: provider.name
+        });
+      });
+    });
+    
+    return {
+      object: "list",
+      data: models
+    };
+  });
+
+  // Model Pool Management Endpoints
+  
+  // Get model pool status
+  fastify.get("/model-pool/status", async () => {
+    return fastify.modelPoolManager.getStatus();
+  });
+
+  // Get queue status
+  fastify.get("/model-pool/queue", async () => {
+    return fastify.modelPoolManager.getQueueStatus();
+  });
+
+  // Get model pool configuration
+  fastify.get("/model-pool/config", async () => {
+    return fastify.modelPoolManager.getConfig();
+  });
+
+  // Reset circuit breakers
+  fastify.post("/model-pool/reset-circuit-breakers", async () => {
+    fastify.modelPoolManager.resetCircuitBreakers();
+    return { success: true, message: "All circuit breakers reset" };
+  });
+
+  // Clear all queues
+  fastify.post("/model-pool/clear-queue", async () => {
+    fastify.modelPoolManager.clearQueue();
+    return { success: true, message: "All queues cleared" };
+  });
 
   };
 
