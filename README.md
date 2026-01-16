@@ -6,13 +6,6 @@
 
 <hr>
 
-![](blog/images/sponsors/glm-en.jpg)
-> This project is sponsored by Z.ai, supporting us with their GLM CODING PLAN.    
-> GLM CODING PLAN is a subscription service designed for AI coding, starting at just $3/month. It provides access to their flagship GLM-4.7 model across 10+ popular AI coding tools (Claude Code, Cline, Roo Code, etc.), offering developers top-tier, fast, and stable coding experiences.     
-> Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB     
-
-> [Progressive Disclosure of Agent Tools from the Perspective of CLI Tool Style](/blog/en/progressive-disclosure-of-agent-tools-from-the-perspective-of-cli-tool-style.md)
-
 > A powerful tool to route Claude Code requests to different models and customize any request.
 
 ![](blog/images/claude-code.png)
@@ -24,8 +17,16 @@
 - **Request/Response Transformation**: Customize requests and responses for different providers using transformers.
 - **Dynamic Model Switching**: Switch models on-the-fly within Claude Code using the `/model` command.
 - **CLI Model Management**: Manage models and providers directly from the terminal with `ccr model`.
+- **Custom-Model**: Automatic model routing without explicit provider specification - use `model: "custom-model"` to let CCR intelligently route to your configured default model.
+- **Intelligent Failover**: Automatic provider switching on rate limits, capacity limits, or failures with parallel execution for faster recovery.
+- **Parallel Execution**: Multiple failover alternatives tried simultaneously, reducing latency by 60-70% compared to sequential retry.
+- **Model Pool Management**: Intelligent concurrent request management with configurable capacity limits, circuit breakers, and rate limit tracking.
+- **Request Queuing**: Priority-based request queuing when models are at capacity.
+- **Circuit Breaker Pattern**: Prevents cascading failures by temporarily disabling problematic providers.
+- **Rate Limit Tracking**: Automatic detection of rate limits with exponential backoff to avoid hitting provider limits repeatedly.
 - **GitHub Actions Integration**: Trigger Claude Code tasks in your GitHub workflows.
 - **Plugin System**: Extend functionality with custom transformers.
+- **Web UI**: Intuitive web-based configuration interface with real-time monitoring.
 
 ## 🚀 Getting Started
 
@@ -61,6 +62,8 @@ The `config.json` file has several key sections:
 
 - **`Providers`**: Used to configure different model providers.
 - **`Router`**: Used to set up routing rules. `default` specifies the default model, which will be used for all requests if no other route is configured.
+- **`failover`**: Configure automatic failover to alternative providers when the primary model encounters errors or capacity limits.
+- **`modelPool`**: Configure concurrent request limits, circuit breaker settings, rate limit tracking, and queue management.
 - **`API_TIMEOUT_MS`**: Specifies the timeout for API calls in milliseconds.
 
 #### Environment Variable Interpolation
@@ -199,6 +202,41 @@ Here is a comprehensive example:
     "longContext": "openrouter,google/gemini-2.5-pro-preview",
     "longContextThreshold": 60000,
     "webSearch": "gemini,gemini-2.5-flash"
+  },
+  "failover": {
+    "deepseek": [
+      "openrouter",
+      { "provider": "gemini", "model": "gemini-2.5-pro" }
+    ],
+    "openrouter": [
+      "deepseek"
+    ],
+    "global": ["ollama"]
+  },
+  "modelPool": {
+    "maxConcurrentPerModel": 2,
+    "circuitBreaker": {
+      "failureThreshold": 5,
+      "cooldownPeriod": 60000,
+      "testRequestAfterCooldown": true
+    },
+    "rateLimit": {
+      "defaultRetryAfter": 60000,
+      "respectRetryAfterHeader": true,
+      "backoffMultiplier": 1.5,
+      "maxBackoff": 300000
+    },
+    "queue": {
+      "maxQueueSize": 100,
+      "queueTimeout": 300000,
+      "priorityLevels": {
+        "high": 10,
+        "normal": 0,
+        "low": -10
+      },
+      "skipRateLimited": true
+    },
+    "priorityFailover": true
   }
 }
 ```
@@ -225,7 +263,7 @@ For a more intuitive experience, you can use the UI mode to manage your configur
 ccr ui
 ```
 
-This will open a web-based interface where you can easily view and edit your `config.json` file.
+This will open a web-based interface where you can easily view and edit your `config.json` file, monitor model pool status, and manage failover configuration.
 
 ![UI](/blog/images/ui.png)
 
@@ -319,7 +357,511 @@ The `activate` command sets the following environment variables:
 
 > **Note**: Make sure the Claude Code Router service is running (`ccr start`) before using the activated environment variables. The environment variables are only valid for the current shell session. To make them persistent, you can add `eval "$(ccr activate)"` to your shell configuration file (e.g., `~/.zshrc` or `~/.bashrc`).
 
-#### Providers
+## 🎯 Custom-Model Feature
+
+The custom-model feature enables automatic model routing without requiring clients to explicitly specify which provider and model to use.
+
+### How It Works
+
+When a client sends `model: "custom-model"`, CCR automatically:
+
+1. Recognizes the custom-model identifier
+2. Routes the request to your configured `Router.default` model
+3. Checks model capacity via ModelPoolManager
+4. Triggers intelligent failover if the primary model is unavailable
+5. Executes requests with parallel alternatives for faster recovery
+
+### API Usage
+
+```bash
+curl -X POST http://localhost:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "custom-model",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+### Listing Available Models
+
+```bash
+curl http://localhost:3456/v1/models
+```
+
+Response includes custom-model with capabilities:
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "custom-model",
+      "object": "model",
+      "owned_by": "claude-code-router",
+      "description": "Automatic model routing using Router.default with intelligent failover",
+      "capabilities": {
+        "automatic_routing": true,
+        "failover": true,
+        "parallel_execution": true
+      }
+    },
+    {
+      "id": "glm-4.7",
+      "object": "model",
+      "owned_by": "iflow",
+      "provider": "iflow"
+    }
+  ]
+}
+```
+
+### When to Use Custom-Model
+
+**Use custom-model when:**
+- You want automatic routing to your default model
+- You want intelligent failover on rate limits or failures
+- You're building integration with tools like OpenCode
+- You don't want to manage provider,model strings in your application
+
+**Use explicit provider,model when:**
+- You need to use a specific model for a specific task
+- You're using scenario-specific models (think, longContext, background, webSearch)
+- You want direct control over which provider/model is used
+
+### Important Notes
+
+- **ccr code does NOT automatically inject custom-model**: You must explicitly specify `model: "custom-model"` in your requests or configuration
+- **Failover only works for custom-model**: Other scenarios (think, longContext, background, webSearch) do not use failover by design
+- **Router.default is required**: Without `Router.default` configured, custom-model will fail with an error
+
+For detailed documentation, see [CUSTOM_MODEL_GUIDE.md](CUSTOM_MODEL_GUIDE.md).
+
+## 🔄 Failover Configuration
+
+Configure automatic failover to alternative providers when the primary model encounters errors or capacity limits.
+
+### Configuration Structure
+
+Failover configuration is now at the **root level** of `config.json`:
+
+```json
+{
+  "failover": {
+    "iflow": [
+      "iflowX",
+      { "provider": "openai", "model": "gpt-4" }
+    ],
+    "global": ["backup-provider"]
+  }
+}
+```
+
+### Configuration Options
+
+#### Provider-Specific Failover
+
+Define alternatives for specific providers:
+
+```json
+{
+  "failover": {
+    "iflow": [
+      "iflowX",                           // Same provider, different model
+      { "provider": "openai", "model": "gpt-4" },  // Different provider
+      { "provider": "iflow", "model": "minimax-m2.1" }  // Same provider, different model
+    ]
+  }
+}
+```
+
+#### Global Failover
+
+Define fallback alternatives that work for any provider:
+
+```json
+{
+  "failover": {
+    "global": ["backup-provider", "another-backup"]
+  }
+}
+```
+
+#### String vs Object Format
+
+You can use either format:
+
+```json
+{
+  "failover": {
+    "iflow": [
+      "iflowX"                           // String: use same model
+    ],
+    "openai": [
+      { "provider": "anthropic", "model": "claude-3-opus" }  // Object: specify both provider and model
+    ]
+  }
+}
+```
+
+### Failover Behavior
+
+**Failover is triggered when:**
+- Rate limit detected (HTTP 429, 449)
+- Circuit breaker open
+- Model at capacity (max concurrent requests reached)
+- Provider errors (HTTP 502, 503)
+
+**Failover process:**
+1. Primary model unavailable
+2. Build alternatives from failover configuration
+3. Filter out rate-limited and circuit-open alternatives
+4. Try remaining alternatives in parallel
+5. Return first successful response
+6. Cancel remaining parallel requests
+
+### Important: Failover Scope
+
+**Failover is ONLY enabled for custom-model (default scenario):**
+- ✅ custom-model → Router.default → Failover enabled
+- ❌ Router.think → No failover (queues if unavailable)
+- ❌ Router.longContext → No failover (queues if unavailable)
+- ❌ Router.background → No failover (queues if unavailable)
+- ❌ Router.webSearch → No failover (queues if unavailable)
+
+This is by design to preserve scenario-specific behavior. Thinking tasks should use the thinking model, long context tasks should use the long context model, etc.
+
+### UI Configuration
+
+You can configure failover in the web UI:
+
+1. Run `ccr ui`
+2. Navigate to Router section
+3. Expand "Failover Configuration"
+4. Add provider-specific or global failover alternatives
+5. Save and restart
+
+## ⚡ Parallel Execution & Model Pool Management
+
+### Overview
+
+CCR supports intelligent parallel execution with automatic failover for multiple concurrent requests:
+
+- **Multiple concurrent instances**: Run multiple `ccr code` instances simultaneously
+- **Intelligent model sharing**: Each provider+model handles up to 2 concurrent requests (configurable)
+- **Automatic failover**: Switch to alternatives when models are at capacity or encounter errors
+- **Request queuing**: Priority-based queue when models are at capacity
+- **Circuit breaker pattern**: Prevent cascading failures from problematic providers
+- **Rate limit tracking**: Exponential backoff to avoid hitting provider limits repeatedly
+- **Parallel execution**: Multiple alternatives tried simultaneously (60-70% faster than sequential)
+
+### Model Pool Configuration
+
+Add the `modelPool` section to your `config.json`:
+
+```json
+{
+  "modelPool": {
+    "maxConcurrentPerModel": 2,
+    "circuitBreaker": {
+      "failureThreshold": 5,
+      "cooldownPeriod": 60000,
+      "testRequestAfterCooldown": true
+    },
+    "rateLimit": {
+      "defaultRetryAfter": 60000,
+      "respectRetryAfterHeader": true,
+      "backoffMultiplier": 1.5,
+      "maxBackoff": 300000
+    },
+    "queue": {
+      "maxQueueSize": 100,
+      "queueTimeout": 300000,
+      "priorityLevels": {
+        "high": 10,
+        "normal": 0,
+        "low": -10
+      },
+      "skipRateLimited": true
+    },
+    "priorityFailover": true
+  }
+}
+```
+
+### Configuration Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `maxConcurrentPerModel` | number | 2 | Maximum concurrent requests per provider+model |
+| `circuitBreaker.failureThreshold` | number | 5 | Failures before opening circuit breaker |
+| `circuitBreaker.cooldownPeriod` | number | 60000 | Cooldown period in milliseconds |
+| `circuitBreaker.testRequestAfterCooldown` | boolean | true | Allow test request after cooldown |
+| `rateLimit.defaultRetryAfter` | number | 60000 | Default retry after rate limit |
+| `rateLimit.respectRetryAfterHeader` | boolean | true | Respect provider's Retry-After header |
+| `rateLimit.backoffMultiplier` | number | 1.5 | Exponential backoff multiplier |
+| `rateLimit.maxBackoff` | number | 300000 | Maximum backoff duration |
+| `queue.maxQueueSize` | number | 100 | Maximum queued requests per model |
+| `queue.queueTimeout` | number | 300000 | Queue timeout in milliseconds |
+| `queue.priorityLevels.high` | number | 10 | High priority value |
+| `queue.priorityLevels.normal` | number | 0 | Normal priority value |
+| `queue.priorityLevels.low` | number | -10 | Low priority value |
+| `priorityFailover` | boolean | true | Enable priority-based failover |
+
+### Circuit Breaker Pattern
+
+Prevents cascading failures by temporarily disabling problematic providers:
+
+1. **Normal**: Requests flow normally
+2. **Failure Detection**: Each failure increments counter
+3. **Circuit Opens**: After `failureThreshold` failures
+4. **Cooldown**: Requests blocked for `cooldownPeriod`
+5. **Test Request**: One request allowed to test recovery
+6. **Circuit Closes**: If test succeeds, normal flow resumes
+
+### Rate Limit Tracking
+
+Automatically tracks rate limits and avoids hitting limits repeatedly:
+
+- Detects HTTP 429/449 responses
+- Respects `Retry-After` header from providers
+- Uses exponential backoff for repeated rate limits
+- Redirects requests to available alternatives
+
+### Multiple ccr code Instances
+
+You can now run multiple `ccr code` instances simultaneously:
+
+```bash
+# Terminal 1
+ccr code
+
+# Terminal 2
+ccr code
+
+# Terminal 3
+ccr code
+```
+
+Each instance intelligently shares the model pool, with each provider+model handling up to 2 concurrent requests (configurable).
+
+### Request Priority
+
+Set request priority using the `X-CCR-Priority` header:
+
+```javascript
+const response = await fetch('http://localhost:3456/v1/messages', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-CCR-Priority': '10'  // High priority
+  },
+  body: JSON.stringify({
+    model: 'iflow,glm-4.7',
+    messages: [{ role: 'user', content: 'Hello' }]
+  })
+});
+```
+
+Priority values:
+- **High**: 10 (processed first)
+- **Normal**: 0 (default)
+- **Low**: -10 (processed last)
+
+For detailed documentation, see [PARALLEL_EXECUTION_GUIDE.md](PARALLEL_EXECUTION_GUIDE.md).
+
+## 🔌 OpenCode Integration
+
+### Overview
+
+OpenCode can be integrated with CCR's custom-model functionality for automatic model routing with intelligent failover.
+
+### Configuration
+
+Configure OpenCode to use CCR with custom-model:
+
+```json
+{
+  "model": "iflow/custom-model",
+  "provider": {
+    "iflow": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "iFlow Provider (CCR with Custom-Model)",
+      "options": {
+        "baseURL": "http://127.0.0.1:3456/v1",
+        "apiKey": "test"
+      },
+      "models": {
+        "custom-model": {
+          "id": "custom-model",
+          "limit": {
+            "context": 200000,
+            "output": 65536
+          }
+        },
+        "glm-4.7": {
+          "id": "iflow,glm-4.7",
+          "limit": {
+            "context": 200000,
+            "output": 65536
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Benefits
+
+- **Automatic routing**: OpenCode sends `model: "custom-model"` and CCR routes to Router.default
+- **Intelligent failover**: Automatically switches to alternatives when primary is unavailable
+- **Parallel execution**: Multiple alternatives tried simultaneously for faster recovery
+- **Circuit breaker protection**: Prevents cascading failures
+- **Rate limit tracking**: Exponential backoff for rate-limited providers
+
+### How It Works
+
+```
+OpenCode → CCR (model: custom-model)
+  ↓
+CCR routes to Router.default (iflow,glm-4.7)
+  ↓
+Checks capacity via ModelPoolManager
+  ↓
+If unavailable → Tries failover alternatives in parallel
+  ↓
+Returns first successful response to OpenCode
+```
+
+### Testing
+
+1. Restart CCR: `ccr restart`
+2. Test with curl:
+```bash
+curl -X POST http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "custom-model",
+    "messages": [{"role": "user", "content": "Hello from custom-model!"}],
+    "max_tokens": 100
+  }'
+```
+3. Use OpenCode with the iflow provider and custom-model
+
+For detailed documentation, see [OPENCODE_CUSTOM_MODEL_INTEGRATION.md](OPENCODE_CUSTOM_MODEL_INTEGRATION.md).
+
+## 📊 Monitoring & Observability
+
+### API Endpoints
+
+#### Get Model Pool Status
+
+```bash
+curl http://localhost:3456/model-pool/status
+```
+
+Returns status of all model slots:
+
+```json
+{
+  "iflow,glm-4.7": {
+    "activeRequests": 1,
+    "maxConcurrent": 2,
+    "queuedRequests": 3,
+    "circuitBreakerOpen": false,
+    "circuitBreakerOpenUntil": null,
+    "rateLimitUntil": null,
+    "failureCount": 2,
+    "successCount": 98,
+    "successRate": 98.0,
+    "lastUsed": "2026-01-16T10:30:45.123Z"
+  }
+}
+```
+
+#### Get Queue Status
+
+```bash
+curl http://localhost:3456/model-pool/queue
+```
+
+Returns queue status for models with queued requests:
+
+```json
+{
+  "iflow,glm-4.7": {
+    "queueLength": 3,
+    "oldestRequestTimestamp": 1705057845123,
+    "oldestRequestAge": 15000,
+    "priorityRange": {
+      "min": 0,
+      "max": 10
+    }
+  }
+}
+```
+
+#### Get Model Pool Configuration
+
+```bash
+curl http://localhost:3456/model-pool/config
+```
+
+Returns current model pool configuration.
+
+#### Reset Circuit Breakers
+
+```bash
+curl -X POST http://localhost:3456/model-pool/reset-circuit-breakers
+```
+
+Resets all circuit breakers, allowing requests to flow again.
+
+#### Clear Queue
+
+```bash
+curl -X POST http://localhost:3456/model-pool/clear-queue
+```
+
+Clears all queued requests (rejected with error).
+
+### Web UI Monitoring
+
+Run `ccr ui` and navigate to Model Pool Status page to:
+- View active requests per model
+- Monitor queue length and wait times
+- Check circuit breaker status
+- See rate limit status
+- Reset circuit breakers if needed
+
+### Key Metrics
+
+Monitor these metrics for optimal performance:
+
+1. **Active Requests**: Current requests per model
+2. **Queue Length**: Number of queued requests per model
+3. **Queue Wait Time**: Average time requests spend in queue
+4. **Circuit Breaker Status**: Open/closed state per provider
+5. **Rate Limit Status**: Rate-limited providers
+6. **Success Rate**: Percentage of successful requests per provider
+7. **Failover Rate**: Percentage of requests using alternatives
+
+### Log Messages
+
+Watch for these log messages:
+
+```
+[INFO] custom-model resolved to Router.default: iflow,glm-4.7
+[INFO] Acquired slot for iflow,glm-4.7 (1/2 active)
+[INFO] Request queued for iflow,glm-4.7 (queue position: 3)
+[WARN] Primary model iflow,glm-4.7 is rate-limited, looking for alternative
+[INFO] Using alternative model iflowX,glm-4.7 instead of iflow,glm-4.7
+[INFO] Alternative iflowX,glm-4.7 succeeded
+[WARN] Circuit breaker opened for iflow,glm-4.7 (5 consecutive failures)
+[INFO] Circuit breaker closed for iflow,glm-4.7 (recovered after cooldown)
+[INFO] Rate limit detected for iflow,glm-4.7 (retry after: 60s)
+```
+
+## 🛠️ Providers
 
 The `Providers` array is where you define the different model providers you want to use. Each provider object requires:
 
@@ -329,7 +871,7 @@ The `Providers` array is where you define the different model providers you want
 - `models`: A list of model names available from this provider.
 - `transformer` (optional): Specifies transformers to process requests and responses.
 
-#### Transformers
+## 🔄 Transformers
 
 Transformers allow you to modify the request and response payloads to ensure compatibility with different provider APIs.
 
@@ -435,23 +977,23 @@ You can also create your own transformers and load them via the `transformers` f
 }
 ```
 
-#### Router
+## 🧭 Router
 
 The `Router` object defines which model to use for different scenarios:
 
-- `default`: The default model for general tasks.
+- `default`: The default model for general tasks. Used by custom-model.
 - `background`: A model for background tasks. This can be a smaller, local model to save costs.
 - `think`: A model for reasoning-heavy tasks, like Plan Mode.
 - `longContext`: A model for handling long contexts (e.g., > 60K tokens).
 - `longContextThreshold` (optional): The token count threshold for triggering the long context model. Defaults to 60000 if not specified.
 - `webSearch`: Used for handling web search tasks and this requires the model itself to support the feature. If you're using openrouter, you need to add the `:online` suffix after the model name.
-- `image` (beta): Used for handling image-related tasks (supported by CCR’s built-in agent). If the model does not support tool calling, you need to set the `config.forceUseImageAgent` property to `true`.
+- `image` (beta): Used for handling image-related tasks (supported by CCR's built-in agent). If the model does not support tool calling, you need to set the `config.forceUseImageAgent` property to `true`.
 
 - You can also switch models dynamically in Claude Code with the `/model` command:
 `/model provider_name,model_name`
 Example: `/model openrouter,anthropic/claude-3.5-sonnet`
 
-#### Custom Router
+### Custom Router
 
 For more advanced routing logic, you can specify a custom router script via the `CUSTOM_ROUTER_PATH` in your `config.json`. This allows you to implement complex routing rules beyond the default scenarios.
 
@@ -490,7 +1032,7 @@ module.exports = async function router(req, config) {
 };
 ```
 
-##### Subagent Routing
+### Subagent Routing
 
 For routing within subagents, you must specify a particular provider and model by including `<CCR-SUBAGENT-MODEL>provider,model</CCR-SUBAGENT-MODEL>` at the **beginning** of the subagent's prompt. This allows you to direct specific subagent tasks to designated models.
 
@@ -501,7 +1043,8 @@ For routing within subagents, you must specify a particular provider and model b
 Please help me analyze this code snippet for potential optimizations...
 ```
 
-## Status Line (Beta)
+## 📈 Status Line (Beta)
+
 To better monitor the status of claude-code-router at runtime, version v1.0.40 includes a built-in statusline tool, which you can enable in the UI.
 ![statusline-config.png](/blog/images/statusline-config.png)
 
@@ -570,11 +1113,15 @@ jobs:
 
 This setup allows for interesting automations, like running tasks during off-peak hours to reduce API costs.
 
-## 📝 Further Reading
+## 📚 Further Reading
 
 - [Project Motivation and How It Works](blog/en/project-motivation-and-how-it-works.md)
 - [Maybe We Can Do More with the Router](blog/en/maybe-we-can-do-more-with-the-route.md)
 - [GLM-4.6 Supports Reasoning and Interleaved Thinking](blog/en/glm-4.6-supports-reasoning.md)
+- [Custom-Model Implementation Guide](CUSTOM_MODEL_GUIDE.md)
+- [Custom-Model Implementation Summary](CUSTOM_MODEL_IMPLEMENTATION_SUMMARY.md)
+- [Parallel Execution Guide](PARALLEL_EXECUTION_GUIDE.md)
+- [OpenCode Integration Guide](OPENCODE_CUSTOM_MODEL_INTEGRATION.md)
 
 ## ❤️ Support & Sponsoring
 
@@ -594,7 +1141,6 @@ If you find this project helpful, please consider sponsoring its development. Yo
 ### Our Sponsors
 
 A huge thank you to all our sponsors for their generous support!
-
 
 - [AIHubmix](https://aihubmix.com/)
 - [BurnCloud](https://ai.burncloud.com)
@@ -688,17 +1234,16 @@ A huge thank you to all our sponsors for their generous support!
 - @\*涛
 - [@苗大](https://github.com/WitMiao)
 - @\*呢
-- @\d*u
+- @\\d*u
 - @crizcraig
 - s\*s
-- \*火
-- \*勤
-- \*\*锟
-- \*涛
-- \*\*明
-- \*知
-- \*语
-- \*瓜
-
+- \\*火
+- \\*勤
+- \\*\*锟
+- \\*涛
+- \\*\*明
+- \\*知
+- \\*语
+- \\*瓜
 
 (If your name is masked, please contact me via my homepage email to update it with your GitHub username.)
