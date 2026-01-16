@@ -1052,8 +1052,7 @@ export const registerApiRoutes = async (
     fastify.modelPoolManager.clearQueue();
     return { success: true, message: "All queues cleared" };
   });
-
-  };
+};
 
 // Helper function
 function isValidUrl(url: string): boolean {
