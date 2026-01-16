@@ -196,9 +196,9 @@ async function handleTransformerEndpoint(
     return formatResponse(finalResponse, reply, body);
   } catch (error: any) {
     // Track rate limit if applicable
-    if (fastify.modelPoolManager && (error.statusCode === 429 || error.statusCode === 449)) {
+    if (fastify.modelPoolManager && (error.statusCode === 429 || error.statusCode === 439 || error.statusCode === 449)) {
       const [providerName, modelName] = body.model.split(',');
-      const retryAfter = error.headers?.['retry-after'] 
+      const retryAfter = error.headers?.['retry-after']
         ? parseInt(error.headers['retry-after']) * 1000
         : 60000; // Default 60s
       fastify.modelPoolManager.markRateLimit(
@@ -208,10 +208,11 @@ async function handleTransformerEndpoint(
       );
     }
 
-    // Handle fallback for rate limits (HTTP 429, 449) and provider errors
-    const shouldFallback = 
-      error.code === 'provider_response_error' || 
+    // Handle fallback for rate limits (HTTP 429, 439, 449) and provider errors
+    const shouldFallback =
+      error.code === 'provider_response_error' ||
       error.statusCode === 429 || // Rate limit (standard)
+      error.statusCode === 439 || // Rate limit (some providers)
       error.statusCode === 449 || // Rate limit (Microsoft/Windows)
       error.statusCode === 503 || // Service unavailable
       error.statusCode === 502;   // Bad gateway
@@ -458,8 +459,8 @@ async function tryAlternativesParallel(
         fastify.modelPoolManager.markFailure(alternative.provider, alternative.model);
         
         // Check if rate limited - mark immediately
-        if (fallbackError.statusCode === 429 || fallbackError.statusCode === 449) {
-          const retryAfter = fallbackError.headers?.['retry-after'] 
+        if (fallbackError.statusCode === 429 || fallbackError.statusCode === 439 || fallbackError.statusCode === 449) {
+          const retryAfter = fallbackError.headers?.['retry-after']
             ? parseInt(fallbackError.headers['retry-after']) * 1000
             : undefined; // Let exponential backoff handle it
           fastify.modelPoolManager.markRateLimit(
