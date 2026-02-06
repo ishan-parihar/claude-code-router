@@ -32,6 +32,8 @@ import { ProviderService } from "./services/provider";
 import { TransformerService } from "./services/transformer";
 import { TokenizerService } from "./services/tokenizer";
 import { ModelPoolManager } from "./services/model-pool-manager";
+import { ModelSelector } from "./services/model-selector";
+import { EndpointGroupManager } from "./services/endpoint-group-manager";
 import { router, calculateTokenCount, searchProjectBySession } from "./utils/router";
 import { sessionUsageCache } from "./utils/cache";
 
@@ -47,9 +49,20 @@ declare module "fastify" {
     queueModel?: string;
     sessionId?: string;
     resolvedModel?: string;
+    requestId?: string;
+    shouldParallelExecute?: boolean;
+    parallelCandidates?: Array<{ provider: string; model: string }>;
+    alternatives?: Array<{ provider: string; model: string }>;
   }
   interface FastifyInstance {
     _server?: Server;
+    configService: ConfigService;
+    transformerService: TransformerService;
+    providerService: ProviderService;
+    tokenizerService: TokenizerService;
+    modelPoolManager: ModelPoolManager;
+    modelSelector: any;
+    endpointGroupManager: EndpointGroupManager;
   }
 }
 
@@ -80,6 +93,8 @@ class Server {
   transformerService: TransformerService;
   tokenizerService: TokenizerService;
   modelPoolManager: ModelPoolManager;
+  modelSelector: ModelSelector;
+  endpointGroupManager: EndpointGroupManager;
 
   constructor(options: ServerOptions = {}) {
     const { initialConfig, ...fastifyOptions } = options;
@@ -97,12 +112,35 @@ class Server {
       this.app.log
     );
     this.modelPoolManager = new ModelPoolManager(this.configService, this.app.log);
+    this.modelSelector = new ModelSelector(
+      this.modelPoolManager,
+      this.configService,
+      this.app.log
+    );
+    this.endpointGroupManager = new EndpointGroupManager(
+      {
+        enabled: this.configService.get('endpointRateLimiting.enabled') !== false,
+        maxConcurrentPerEndpoint: this.configService.get('endpointRateLimiting.maxConcurrentPerEndpoint') || 2,
+        strategy: this.configService.get('endpointRateLimiting.strategy') || 'least-loaded',
+        providerWeights: this.configService.get('endpointRateLimiting.providerWeights') || {},
+      },
+      this.app.log
+    );
     this.transformerService.initialize().finally(() => {
       this.providerService = new ProviderService(
         this.configService,
         this.transformerService,
         this.app.log
       );
+      // Register all providers with endpoint group manager
+      const providers = this.providerService.getProviders();
+      for (const provider of providers) {
+        this.endpointGroupManager.registerProvider(
+          provider.name,
+          provider.baseUrl,
+          provider.models
+        );
+      }
     });
     // Initialize tokenizer service
     this.tokenizerService.initialize().catch((error) => {
@@ -150,6 +188,8 @@ class Server {
         fastify.decorate('providerService', this.providerService);
         fastify.decorate('tokenizerService', this.tokenizerService);
         fastify.decorate('modelPoolManager', this.modelPoolManager);
+        fastify.decorate('modelSelector', this.modelSelector);
+        fastify.decorate('endpointGroupManager', this.endpointGroupManager);
         // Add router hook for main namespace
         fastify.addHook('preHandler', async (req: any, reply: any) => {
           const url = new URL(`http://127.0.0.1${req.url}`);
@@ -158,6 +198,7 @@ class Server {
               configService: this.configService,
               tokenizerService: this.tokenizerService,
               modelPoolManager: this.modelPoolManager,
+              modelSelector: this.modelSelector,
             });
           }
         });
@@ -188,12 +229,15 @@ class Server {
     );
     await tokenizerService.initialize();
     const modelPoolManager = new ModelPoolManager(configService, this.app.log);
+    const modelSelector = new ModelSelector(modelPoolManager, configService, this.app.log);
     await this.app.register(async (fastify) => {
       fastify.decorate('configService', configService);
       fastify.decorate('transformerService', transformerService);
       fastify.decorate('providerService', providerService);
       fastify.decorate('tokenizerService', tokenizerService);
       fastify.decorate('modelPoolManager', modelPoolManager);
+      fastify.decorate('modelSelector', modelSelector);
+      fastify.decorate('endpointGroupManager', this.endpointGroupManager);
       // Add router hook for namespace
       fastify.addHook('preHandler', async (req: any, reply: any) => {
         const url = new URL(`http://127.0.0.1${req.url}`);
@@ -202,6 +246,7 @@ class Server {
             configService,
             tokenizerService,
             modelPoolManager,
+            modelSelector,
           });
         }
       });
@@ -240,10 +285,8 @@ class Server {
                   .send({ error: "Missing model in request body" });
               }
               
+              // Don't parse custom-model here - let the router handle it
               if (body.model === "custom-model") {
-                req.provider = "custom-model";
-                req.model = "custom-model";
-                req.body.model = "custom-model";
                 return;
               }
               

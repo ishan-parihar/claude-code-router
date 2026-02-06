@@ -11,7 +11,7 @@ try {
 
   // Build using the core package's build script
   console.log('Building core package (CJS and ESM)...');
-  execSync('pnpm build', {
+  execSync('npx tsx scripts/build.ts', {
     stdio: 'inherit',
     cwd: coreDir
   });

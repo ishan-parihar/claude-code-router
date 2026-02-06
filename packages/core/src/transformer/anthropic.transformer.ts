@@ -161,11 +161,11 @@ export class AnthropicTransformer implements Transformer {
             }
 
             const thinkingPart = msg.content.find(
-              (c: any) => c.type === "thinking" && c.signature
+              (c: any) => c.type === "thinking"
             );
             if (thinkingPart) {
               assistantMessage.thinking = {
-                content: thinkingPart.thinking,
+                content: thinkingPart.thinking || "",
                 signature: thinkingPart.signature,
               };
             }
@@ -191,7 +191,7 @@ export class AnthropicTransformer implements Transformer {
     if (request.thinking) {
       result.reasoning = {
         effort: getThinkLevel(request.thinking.budget_tokens),
-        // max_tokens: request.thinking.budget_tokens,
+        max_tokens: request.thinking.budget_tokens,
         enabled: request.thinking.type === "enabled",
       };
     }
@@ -427,7 +427,7 @@ export class AnthropicTransformer implements Transformer {
                 if (chunk.error) {
                   const errorMessage = {
                     type: "error",
-                    message: {
+                    error: {
                       type: "api_error",
                       message: JSON.stringify(chunk.error),
                     },
@@ -508,23 +508,15 @@ export class AnthropicTransformer implements Transformer {
                   continue;
                 }
 
-                if (choice?.delta?.thinking && !isClosed && !hasFinished) {
-                  // Close any previous content block if open
-                  // if (currentContentBlockIndex >= 0) {
-                  //   const contentBlockStop = {
-                  //     type: "content_block_stop",
-                  //     index: currentContentBlockIndex,
-                  //   };
-                  //   safeEnqueue(
-                  //     encoder.encode(
-                  //       `event: content_block_stop\ndata: ${JSON.stringify(
-                  //         contentBlockStop
-                  //       )}\n\n`
-                  //     )
-                  //   );
-                  //   currentContentBlockIndex = -1;
-                  // }
+                // Handle thinking/reasoning content from various provider formats
+                const thinkingContent = choice?.delta?.thinking?.content ||
+                  choice?.delta?.thinking ||
+                  choice?.delta?.reasoning ||
+                  choice?.delta?.reasoning_content;
+                const thinkingSignature = choice?.delta?.thinking?.signature;
+                const hasThinking = thinkingContent || thinkingSignature;
 
+                if (hasThinking && !isClosed && !hasFinished) {
                   if (!isThinkingStarted) {
                     const thinkingBlockIndex = assignContentBlockIndex();
                     const contentBlockStart = {
@@ -542,19 +534,21 @@ export class AnthropicTransformer implements Transformer {
                     currentContentBlockIndex = thinkingBlockIndex;
                     isThinkingStarted = true;
                   }
-                  if (choice.delta.thinking.signature) {
-                    const thinkingSignature = {
+
+                  // Send signature delta if signature is provided
+                  if (thinkingSignature) {
+                    const thinkingSignatureEvent = {
                       type: "content_block_delta",
                       index: currentContentBlockIndex,
                       delta: {
                         type: "signature_delta",
-                        signature: choice.delta.thinking.signature,
+                        signature: thinkingSignature,
                       },
                     };
                     safeEnqueue(
                       encoder.encode(
                         `event: content_block_delta\ndata: ${JSON.stringify(
-                          thinkingSignature
+                          thinkingSignatureEvent
                         )}\n\n`
                       )
                     );
@@ -570,13 +564,14 @@ export class AnthropicTransformer implements Transformer {
                       )
                     );
                     currentContentBlockIndex = -1;
-                  } else if (choice.delta.thinking.content) {
+                  } else if (thinkingContent) {
+                    // Send thinking content delta
                     const thinkingChunk = {
                       type: "content_block_delta",
                       index: currentContentBlockIndex,
                       delta: {
                         type: "thinking_delta",
-                        thinking: choice.delta.thinking.content || "",
+                        thinking: typeof thinkingContent === "string" ? thinkingContent : JSON.stringify(thinkingContent),
                       },
                     };
                     safeEnqueue(
@@ -1017,11 +1012,19 @@ export class AnthropicTransformer implements Transformer {
           });
         });
       }
-      if ((choice.message as any)?.thinking?.content) {
+      // Handle thinking/reasoning content from various provider formats
+      const message = choice.message as any;
+      const thinkingContent = message?.thinking?.content ||
+        message?.thinking ||
+        message?.reasoning ||
+        message?.reasoning_content;
+      const thinkingSignature = message?.thinking?.signature;
+
+      if (thinkingContent) {
         content.push({
           type: "thinking",
-          thinking: (choice.message as any).thinking.content,
-          signature: (choice.message as any).thinking.signature,
+          thinking: typeof thinkingContent === "string" ? thinkingContent : JSON.stringify(thinkingContent),
+          signature: thinkingSignature,
         });
       }
       const result = {

@@ -31,12 +31,16 @@ try {
     cwd: rootDir
   });
 
-  // Step 2: Build UI package
+  // Step 2: Build UI package (optional, skip if pnpm not available)
   console.log('Building UI package...');
-  execSync('pnpm build', {
-    stdio: 'inherit',
-    cwd: uiDir
-  });
+  try {
+    execSync('pnpm build', {
+      stdio: 'inherit',
+      cwd: uiDir
+    });
+  } catch (error) {
+    console.warn('⚠ Warning: UI build skipped (pnpm not available)');
+  }
 
   // Step 3: Create CLI dist directory
   const cliDistDir = path.join(cliDir, 'dist');
@@ -46,8 +50,7 @@ try {
 
   // Step 4: Build the CLI application
   console.log('Building CLI application...');
-  const esbuildPath = path.join(rootDir, 'node_modules', '.bin', 'esbuild');
-  execSync(`${esbuildPath} src/cli.ts --bundle --platform=node --minify --tree-shaking=true --outfile=dist/cli.js`, {
+  execSync(`npx esbuild src/cli.ts --bundle --platform=node --minify --tree-shaking=true --outfile=dist/cli.js`, {
     stdio: 'inherit',
     cwd: cliDir
   });

@@ -1,14 +1,11 @@
 import { ConfigService } from './config';
 
-/**
- * Represents a slot for a specific provider+model combination
- */
 export interface ModelSlot {
   provider: string;
   model: string;
   activeRequests: number;
   reservedRequests: number;
-  reservedForQueue: number;  // Tracks reservations held for queued requests
+  reservedForQueue: number;
   maxConcurrent: number;
   queuedRequests: QueuedRequest[];
   lastUsed: number;
@@ -21,9 +18,6 @@ export interface ModelSlot {
   successCount: number;
 }
 
-/**
- * Represents a queued request waiting for a slot
- */
 export interface QueuedRequest {
   id: string;
   req: any;
@@ -35,11 +29,9 @@ export interface QueuedRequest {
   timeoutId?: NodeJS.Timeout;
   resolve: (result: any) => void;
   reject: (error: any) => void;
+  reservationTimeoutId?: NodeJS.Timeout;
 }
 
-/**
- * Configuration for model pool behavior
- */
 export interface ModelPoolConfig {
   maxConcurrentPerModel: number;
   circuitBreaker: {
@@ -66,26 +58,21 @@ export interface ModelPoolConfig {
   priorityFailover: boolean;
 }
 
-/**
- * Model Pool Manager
- * 
- * Manages concurrent request slots for provider+model combinations,
- * implements circuit breaker pattern, rate limit tracking, and request queuing.
- */
 export class ModelPoolManager {
   private slots: Map<string, ModelSlot> = new Map();
   private config: ModelPoolConfig;
   private logger: any;
+  private queueProcessCallbacks: Map<string, (request: QueuedRequest) => void> = new Map();
+  private reservationTimeoutMap: Map<string, NodeJS.Timeout> = new Map();
+  private queueProcessingInterval?: NodeJS.Timeout;
 
   constructor(configService: ConfigService, logger: any = console) {
     this.logger = logger;
     this.config = this.loadConfig(configService);
     this.logger.info('[ModelPoolManager] Initialized with config', this.config);
+    this.startQueueProcessing();
   }
 
-  /**
-   * Load configuration from ConfigService
-   */
   private loadConfig(configService: ConfigService): ModelPoolConfig {
     const poolConfig = configService.get<any>('modelPool') || {};
 
@@ -116,12 +103,53 @@ export class ModelPoolManager {
     };
   }
 
-  /**
-   * Get or create a model slot
-   */
+  private startQueueProcessing(): void {
+    this.queueProcessingInterval = setInterval(() => {
+      this.processAllQueues();
+      this.checkQueueHealth();
+    }, 1000); // Process all queues every second
+
+    this.logger.info('[ModelPoolManager] Background queue processing started');
+  }
+
+  private checkQueueHealth(): void {
+    const warningThreshold = this.config.queue.maxQueueSize * 0.8; // 80% of max queue size
+    const criticalThreshold = this.config.queue.maxQueueSize * 0.95; // 95% of max queue size
+
+    for (const [key, slot] of this.slots.entries()) {
+      const queueLength = slot.queuedRequests.length;
+
+      if (queueLength >= criticalThreshold) {
+        this.logger.error(
+          `[ModelPoolManager] CRITICAL: Queue depth for ${key} is ${queueLength}/${this.config.queue.maxQueueSize} (${Math.round(queueLength / this.config.queue.maxQueueSize * 100)}%)`
+        );
+      } else if (queueLength >= warningThreshold) {
+        this.logger.warn(
+          `[ModelPoolManager] WARNING: Queue depth for ${key} is ${queueLength}/${this.config.queue.maxQueueSize} (${Math.round(queueLength / this.config.queue.maxQueueSize * 100)}%)`
+        );
+      }
+    }
+  }
+
+  private processAllQueues(): void {
+    for (const [key, slot] of this.slots.entries()) {
+      if (slot.queuedRequests.length > 0) {
+        this.processQueueForSlot(key);
+      }
+    }
+  }
+
+  destroy(): void {
+    if (this.queueProcessingInterval) {
+      clearInterval(this.queueProcessingInterval);
+      this.queueProcessingInterval = undefined;
+      this.logger.info('[ModelPoolManager] Background queue processing stopped');
+    }
+  }
+
   private getOrCreateSlot(provider: string, model: string): ModelSlot {
     const key = `${provider},${model}`;
-    
+
     if (!this.slots.has(key)) {
       this.slots.set(key, {
         provider,
@@ -138,21 +166,56 @@ export class ModelPoolManager {
         rateLimitBackoffCount: 0,
         rateLimitBaseRetryAfter: this.config.rateLimit.defaultRetryAfter,
       });
+
+      this.logger.debug(
+        `[ModelPoolManager] Created new slot for ${key}`
+      );
     }
-    
+
     return this.slots.get(key)!;
   }
 
-  /**
-   * Check if a model has capacity for a new request
-   * Takes into account active requests, reservations, and queued requests
-   */
+  private validateSlotCounters(slot: ModelSlot, provider: string, model: string): void {
+    let hasIssues = false;
+
+    if (slot.activeRequests < 0) {
+      this.logger.error(
+        `[ModelPoolManager] Negative activeRequests detected for ${provider},${model}: ${slot.activeRequests}. Resetting to 0.`
+      );
+      slot.activeRequests = 0;
+      hasIssues = true;
+    }
+
+    if (slot.reservedRequests < 0) {
+      this.logger.error(
+        `[ModelPoolManager] Negative reservedRequests detected for ${provider},${model}: ${slot.reservedRequests}. Resetting to 0.`
+      );
+      slot.reservedRequests = 0;
+      hasIssues = true;
+    }
+
+    if (slot.reservedForQueue < 0) {
+      this.logger.error(
+        `[ModelPoolManager] Negative reservedForQueue detected for ${provider},${model}: ${slot.reservedForQueue}. Resetting to 0.`
+      );
+      slot.reservedForQueue = 0;
+      hasIssues = true;
+    }
+
+    if (hasIssues) {
+      this.logger.warn(
+        `[ModelPoolManager] Reset counters for ${provider},${model} - ` +
+        `active: ${slot.activeRequests}, reserved: ${slot.reservedRequests}, reservedForQueue: ${slot.reservedForQueue}`
+      );
+    }
+  }
+
   hasCapacity(provider: string, model: string): boolean {
     const slot = this.getOrCreateSlot(provider, model);
-    
-    // Check circuit breaker
+
+    this.validateSlotCounters(slot, provider, model);
+
     if (slot.circuitBreakerOpen) {
-      // Check if cooldown period has passed
       if (slot.circuitBreakerOpenUntil && Date.now() < slot.circuitBreakerOpenUntil) {
         this.logger.debug(
           `[ModelPoolManager] Circuit breaker open for ${provider},${model}, ` +
@@ -160,8 +223,7 @@ export class ModelPoolManager {
         );
         return false;
       }
-      
-      // Cooldown passed, close circuit breaker if test request enabled
+
       if (this.config.circuitBreaker.testRequestAfterCooldown) {
         this.logger.info(
           `[ModelPoolManager] Circuit breaker cooldown passed for ${provider},${model}, ` +
@@ -173,8 +235,7 @@ export class ModelPoolManager {
         return false;
       }
     }
-    
-    // Check rate limit
+
     if (slot.rateLimitUntil && Date.now() < slot.rateLimitUntil) {
       this.logger.debug(
         `[ModelPoolManager] Rate limited for ${provider},${model}, ` +
@@ -182,178 +243,200 @@ export class ModelPoolManager {
       );
       return false;
     }
-    
-    // Check concurrent request limit
-    // Capacity = maxConcurrent - active - reserved - reservedForQueue
-    // The reservedForQueue ensures we don't queue more than we can handle
+
     const effectiveCapacity = slot.maxConcurrent - slot.activeRequests - slot.reservedRequests - slot.reservedForQueue;
     return effectiveCapacity > 0;
   }
 
-  /**
-   * Acquire a slot for a request
-   * Returns true if slot acquired, false if request was queued
-   */
   async acquireSlot(
     provider: string,
     model: string,
     priority: number = 0
   ): Promise<boolean> {
     const slot = this.getOrCreateSlot(provider, model);
-    
-    // Check if we can acquire immediately
+
     if (this.hasCapacity(provider, model)) {
       slot.activeRequests++;
       slot.lastUsed = Date.now();
       this.logger.debug(
         `[ModelPoolManager] Acquired slot for ${provider},${model} ` +
-        `(${slot.activeRequests}/${slot.maxConcurrent} active)`
+        `(${slot.activeRequests}/${slot.maxConcurrent} active, ` +
+        `${slot.reservedRequests} reserved, ${slot.reservedForQueue} reservedForQueue)`
       );
       return true;
     }
-    
-    // Cannot acquire immediately, queue the request
+
     return false;
   }
 
-  /**
-   * Reserve a slot for a request
-   * Returns true if slot reserved, false if no capacity
-   * 
-   * The reserved slot must be confirmed via confirmSlot() or released via releaseReservation()
-   * Unconfirmed reservations auto-expire after 30 seconds
-   */
   reserveSlot(
     provider: string,
     model: string,
-    timeoutMs: number = 30000
-  ): boolean {
+    timeoutMs: number = 30000,
+    reservationId?: string
+  ): string | boolean {
     const slot = this.getOrCreateSlot(provider, model);
+    const key = `${provider},${model}`;
+
+    const currentUsage = slot.activeRequests + slot.reservedRequests + slot.reservedForQueue;
     
-    // Check if we can reserve (considering active, reserved, and reservedForQueue)
-    if ((slot.activeRequests + slot.reservedRequests + slot.reservedForQueue) < slot.maxConcurrent) {
+    if (currentUsage < slot.maxConcurrent) {
       slot.reservedRequests++;
+
+      this.validateSlotCounters(slot, provider, model);
+
       this.logger.debug(
         `[ModelPoolManager] Reserved slot for ${provider},${model} ` +
-        `(${slot.activeRequests} active, ${slot.reservedRequests} reserved, ${slot.reservedForQueue} reservedForQueue)`
+        `(${slot.activeRequests} active, ${slot.reservedRequests} reserved, ${slot.reservedForQueue} reservedForQueue, capacity: ${slot.maxConcurrent})`
       );
-      
-      // Set timeout to release reservation if not confirmed
-      setTimeout(() => {
-        if (slot.reservedRequests > 0) {
-          slot.reservedRequests--;
-          this.logger.debug(
-            `[ModelPoolManager] Reservation timeout for ${provider},${model}`
+
+      const actualReservationId = reservationId || `${key}-${Date.now()}-${Math.random()}`;
+
+      const timeoutId = setTimeout(() => {
+        const currentSlot = this.slots.get(key);
+        if (currentSlot && currentSlot.reservedRequests > 0) {
+          currentSlot.reservedRequests--;
+
+          this.logger.warn(
+            `[ModelPoolManager] Reservation timeout for ${provider},${model} ` +
+            `(reservationId: ${actualReservationId})`
           );
+
+          this.reservationTimeoutMap.delete(actualReservationId);
+
+          this.processQueueForSlot(key);
         }
       }, timeoutMs);
-      
-      return true;
+
+      this.reservationTimeoutMap.set(actualReservationId, timeoutId);
+
+      return actualReservationId;
     }
-    
+
+    this.logger.debug(
+      `[ModelPoolManager] Cannot reserve slot for ${provider},${model} ` +
+      `(usage: ${currentUsage}/${slot.maxConcurrent})`
+    );
+
     return false;
   }
 
-  /**
-   * Confirm a reserved slot (convert to active)
-   */
-  confirmSlot(provider: string, model: string): void {
+  confirmSlot(provider: string, model: string, reservationId?: string): void {
     const slot = this.slots.get(`${provider},${model}`);
     if (!slot) {
       this.logger.warn(`[ModelPoolManager] Slot not found for ${provider},${model}`);
       return;
     }
-    
+
     if (slot.reservedRequests > 0) {
       slot.reservedRequests--;
       slot.activeRequests++;
       slot.lastUsed = Date.now();
+
+      this.validateSlotCounters(slot, provider, model);
+
       this.logger.debug(
         `[ModelPoolManager] Confirmed slot for ${provider},${model} ` +
-        `(${slot.activeRequests}/${slot.maxConcurrent} active)`
+        `(${slot.activeRequests}/${slot.maxConcurrent} active, ${slot.reservedRequests} reserved)`
+      );
+
+      if (reservationId) {
+        const timeoutId = this.reservationTimeoutMap.get(reservationId);
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          this.reservationTimeoutMap.delete(reservationId);
+        }
+      }
+    } else {
+      this.logger.warn(
+        `[ModelPoolManager] Attempted to confirm slot with no reservations for ${provider},${model}`
       );
     }
   }
 
-  /**
-   * Release a reserved slot without converting to active
-   */
-  releaseReservation(provider: string, model: string): void {
+  releaseReservation(provider: string, model: string, reservationId?: string): void {
     const slot = this.slots.get(`${provider},${model}`);
     if (!slot) {
       this.logger.warn(`[ModelPoolManager] Slot not found for ${provider},${model}`);
       return;
     }
-    
+
     if (slot.reservedRequests > 0) {
       slot.reservedRequests--;
-      this.logger.debug(
-        `[ModelPoolManager] Released reservation for ${provider},${model}`
+
+      this.validateSlotCounters(slot, provider, model);
+    } else {
+      this.logger.warn(
+        `[ModelPoolManager] Attempted to release reservation with reservedRequests=0 for ${provider},${model}`
       );
     }
+
+    this.logger.debug(
+      `[ModelPoolManager] Released reservation for ${provider},${model} ` +
+      `(reserved: ${slot.reservedRequests})`
+    );
+
+    if (reservationId) {
+      const timeoutId = this.reservationTimeoutMap.get(reservationId);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        this.reservationTimeoutMap.delete(reservationId);
+      }
+    }
+
+    const key = `${provider},${model}`;
+    this.processQueueForSlot(key);
   }
 
-  /**
-   * Check if a provider+model is currently rate-limited
-   */
   isRateLimited(provider: string, model: string): boolean {
     const slot = this.slots.get(`${provider},${model}`);
     if (!slot) return false;
-    
+
     if (slot.rateLimitUntil && Date.now() < slot.rateLimitUntil) {
       return true;
     }
-    
+
     return false;
   }
 
-  /**
-   * Check if a provider+model has circuit breaker open
-   */
   isCircuitBreakerOpen(provider: string, model: string): boolean {
     const slot = this.slots.get(`${provider},${model}`);
     if (!slot) return false;
-    
+
     if (slot.circuitBreakerOpen && slot.circuitBreakerOpenUntil) {
       if (Date.now() < slot.circuitBreakerOpenUntil) {
         return true;
       }
-      // Cooldown passed, allow test request
+
       if (this.config.circuitBreaker.testRequestAfterCooldown) {
         slot.circuitBreakerOpen = false;
         slot.failureCount = 0;
       }
     }
-    
+
     return false;
   }
 
-  /**
-   * Enqueue a request waiting for a slot
-   * 
-   * IMPORTANT: The caller is responsible for holding a reserved slot BEFORE calling this.
-   * The reserved slot will be converted from reserved to active when the request is processed.
-   */
   async enqueueRequest(
     provider: string,
     model: string,
     req: any,
     reply: any,
     transformer: any,
-    priority: number = 0
+    priority: number = 0,
+    onProcess?: (request: QueuedRequest) => void
   ): Promise<any> {
     const slot = this.getOrCreateSlot(provider, model);
-    
-    // Check queue size limit
+
     if (slot.queuedRequests.length >= this.config.queue.maxQueueSize) {
       throw new Error(
         `Queue full for ${provider},${model} ` +
         `(${slot.queuedRequests.length}/${this.config.queue.maxQueueSize})`
       );
     }
-    
+
     const requestId = `${provider},${model}-${Date.now()}-${Math.random()}`;
-    
+
     return new Promise((resolve, reject) => {
       const queuedRequest: QueuedRequest = {
         id: requestId,
@@ -366,23 +449,24 @@ export class ModelPoolManager {
         resolve,
         reject,
       };
-      
-      // Add to queue (sorted by priority, higher first)
+
       slot.queuedRequests.push(queuedRequest);
       slot.queuedRequests.sort((a, b) => b.priority - a.priority);
-      
-      // Track that we're holding a slot for this queued request
-      // This slot will be converted to active when processed
+
       slot.reservedForQueue++;
-      
-      // Set timeout - when it fires, remove from queue and reject
+
+      if (onProcess) {
+        this.queueProcessCallbacks.set(requestId, onProcess);
+      }
+
       queuedRequest.timeoutId = setTimeout(() => {
         const removed = this.removeFromQueue(provider, model, requestId);
         if (removed) {
+          slot.reservedForQueue--;
           reject(new Error(`Request timeout after ${this.config.queue.queueTimeout}ms`));
         }
       }, this.config.queue.queueTimeout);
-      
+
       this.logger.info(
         `[ModelPoolManager] Request queued for ${provider},${model} ` +
         `(position: ${slot.queuedRequests.length}, priority: ${priority}, reservedForQueue: ${slot.reservedForQueue})`
@@ -390,14 +474,10 @@ export class ModelPoolManager {
     });
   }
 
-  /**
-   * Remove a request from the queue
-   * Returns true if the request was found and removed
-   */
   removeFromQueue(provider: string, model: string, requestId: string): boolean {
     const slot = this.slots.get(`${provider},${model}`);
     if (!slot) return false;
-    
+
     const index = slot.queuedRequests.findIndex((r) => r.id === requestId);
     if (index !== -1) {
       const request = slot.queuedRequests[index];
@@ -405,131 +485,148 @@ export class ModelPoolManager {
         clearTimeout(request.timeoutId);
       }
       slot.queuedRequests.splice(index, 1);
-      // Release the reserved slot that was being held for this queued request
-      if (slot.reservedForQueue > 0) {
-        slot.reservedForQueue--;
-      }
+
+if (slot.reservedForQueue > 0) {
+      slot.reservedForQueue--;
+
+      this.validateSlotCounters(slot, provider, model);
+    } else {
+      this.logger.warn(
+        `[ModelPoolManager] Attempted to decrement reservedForQueue with value=0 for ${provider},${model}`
+      );
+    }
+
+      this.queueProcessCallbacks.delete(requestId);
+
+      this.logger.debug(
+        `[ModelPoolManager] Removed request from queue ${provider},${model} ` +
+        `(remaining: ${slot.queuedRequests.length}, reservedForQueue: ${slot.reservedForQueue})`
+      );
+
       return true;
     }
     return false;
   }
 
-  /**
-   * Process the next queued request for a provider+model
-   * Returns the queued request if one was processed, null otherwise
-   */
   processNextQueuedRequest(provider: string, model: string): QueuedRequest | null {
     const slot = this.slots.get(`${provider},${model}`);
     if (!slot || slot.queuedRequests.length === 0) {
       return null;
     }
-    
+
     const nextRequest = slot.queuedRequests.shift()!;
-    
+
     if (nextRequest.timeoutId) {
       clearTimeout(nextRequest.timeoutId);
     }
-    
-    // Convert reservedForQueue to activeRequests
+
     if (slot.reservedForQueue > 0) {
       slot.reservedForQueue--;
+
+      this.validateSlotCounters(slot, provider, model);
     }
     slot.activeRequests++;
     slot.lastUsed = Date.now();
-    
+
+    this.validateSlotCounters(slot, provider, model);
+
     this.logger.info(
       `[ModelPoolManager] Processing queued request for ${provider},${model} ` +
       `(${slot.queuedRequests.length} remaining, active: ${slot.activeRequests}/${slot.maxConcurrent})`
     );
-    
+
     return nextRequest;
   }
 
-  /**
-   * Release a slot and process next queued request
-   * 
-   * Flow:
-   * 1. Release the active slot
-   * 2. Update success/failure counters
-   3. If there are queued requests waiting, process the next one (convert reserved to active)
-   */
+  private processQueueForSlot(slotKey: string): void {
+    const slot = this.slots.get(slotKey);
+    if (!slot || slot.queuedRequests.length === 0) {
+      return;
+    }
+
+    const effectiveCapacity = slot.maxConcurrent - slot.activeRequests - slot.reservedRequests - slot.reservedForQueue;
+
+    if (effectiveCapacity > 0) {
+      this.logger.debug(
+        `[ModelPoolManager] Processing queue for ${slotKey} ` +
+        `(effectiveCapacity: ${effectiveCapacity}, queued: ${slot.queuedRequests.length})`
+      );
+
+      const nextRequest = this.processNextQueuedRequest(slot.provider, slot.model);
+
+      if (nextRequest) {
+        nextRequest.resolve({ provider: slot.provider, model: slot.model });
+
+        const callback = this.queueProcessCallbacks.get(nextRequest.id);
+        if (callback) {
+          this.logger.debug(`[ModelPoolManager] Invoking processing callback for ${nextRequest.id}`);
+          try {
+            callback(nextRequest);
+          } catch (callbackError) {
+            this.logger.error(`[ModelPoolManager] Error in processing callback: ${callbackError}`);
+          } finally {
+            this.queueProcessCallbacks.delete(nextRequest.id);
+          }
+        }
+      }
+    }
+  }
+
   releaseSlot(provider: string, model: string, success: boolean): void {
     const slot = this.slots.get(`${provider},${model}`);
     if (!slot) {
       this.logger.warn(`[ModelPoolManager] Slot not found for ${provider},${model}`);
       return;
     }
-    
-    // Release active slot
+
+    const beforeRelease = slot.activeRequests;
+
     if (slot.activeRequests > 0) {
       slot.activeRequests--;
+
+      this.validateSlotCounters(slot, provider, model);
+    } else {
+      this.logger.warn(
+        `[ModelPoolManager] Attempted to release slot with activeRequests=0 for ${provider},${model}`
+      );
     }
-    
-    // Update success/failure counters
+
     if (success) {
       slot.successCount++;
     } else {
       slot.failureCount++;
     }
-    
+
     this.logger.debug(
       `[ModelPoolManager] Released slot for ${provider},${model} ` +
-      `(${slot.activeRequests}/${slot.maxConcurrent} active, ${slot.reservedForQueue} reserved for queue)`
+      `(active: ${beforeRelease} → ${slot.activeRequests}/${slot.maxConcurrent}, ` +
+      `reserved: ${slot.reservedRequests}, ` +
+      `queued: ${slot.reservedForQueue})`
     );
-    
-    // Process next queued request if any
-    // The queued request was already holding a reserved slot via reservedForQueue
-    // We just need to convert it to active now that there's capacity
-    if (slot.queuedRequests.length > 0) {
-      const nextRequest = slot.queuedRequests.shift()!;
-      
-      if (nextRequest.timeoutId) {
-        clearTimeout(nextRequest.timeoutId);
-      }
-      
-      // Convert reservedForQueue to active
-      if (slot.reservedForQueue > 0) {
-        slot.reservedForQueue--;
-      }
-      slot.activeRequests++;
-      slot.lastUsed = Date.now();
-      
-      this.logger.info(
-        `[ModelPoolManager] Processing queued request for ${provider},${model} ` +
-        `(${slot.queuedRequests.length} remaining, active: ${slot.activeRequests}/${slot.maxConcurrent})`
-      );
-      
-      // Resolve the promise to let the request proceed
-      nextRequest.resolve({ provider, model });
-    }
+
+    const key = `${provider},${model}`;
+    this.processQueueForSlot(key);
   }
 
-  /**
-   * Mark a provider+model as rate-limited with exponential backoff
-   */
   markRateLimit(provider: string, model: string, retryAfter?: number): void {
     const slot = this.getOrCreateSlot(provider, model);
-    
-    // Increment backoff count
+
     slot.rateLimitBackoffCount++;
-    
-    // Calculate retry after with exponential backoff
+
     let calculatedRetryAfter: number;
-    
+
     if (retryAfter && this.config.rateLimit.respectRetryAfterHeader) {
-      // Use provider's retry-after if available
       calculatedRetryAfter = retryAfter;
       slot.rateLimitBaseRetryAfter = retryAfter;
     } else {
-      // Use exponential backoff
       calculatedRetryAfter = Math.min(
         slot.rateLimitBaseRetryAfter * Math.pow(this.config.rateLimit.backoffMultiplier, slot.rateLimitBackoffCount - 1),
         this.config.rateLimit.maxBackoff
       );
     }
-    
+
     slot.rateLimitUntil = Date.now() + calculatedRetryAfter;
-    
+
     this.logger.warn(
       `[ModelPoolManager] Rate limit marked for ${provider},${model}, ` +
       `retry after ${new Date(slot.rateLimitUntil).toISOString()} ` +
@@ -537,23 +634,19 @@ export class ModelPoolManager {
     );
   }
 
-  /**
-   * Mark a failure for a provider+model
-   */
   markFailure(provider: string, model: string): void {
     const slot = this.getOrCreateSlot(provider, model);
     slot.failureCount++;
-    
+
     this.logger.warn(
       `[ModelPoolManager] Failure marked for ${provider},${model} ` +
       `(failure count: ${slot.failureCount}/${this.config.circuitBreaker.failureThreshold})`
     );
-    
-    // Check if circuit breaker should be opened
+
     if (slot.failureCount >= this.config.circuitBreaker.failureThreshold) {
       slot.circuitBreakerOpen = true;
       slot.circuitBreakerOpenUntil = Date.now() + this.config.circuitBreaker.cooldownPeriod;
-      
+
       this.logger.error(
         `[ModelPoolManager] Circuit breaker opened for ${provider},${model} ` +
         `(cooldown until ${new Date(slot.circuitBreakerOpenUntil).toISOString()})`
@@ -561,44 +654,34 @@ export class ModelPoolManager {
     }
   }
 
-  /**
-   * Mark a success for a provider+model
-   */
   markSuccess(provider: string, model: string): void {
     const slot = this.getOrCreateSlot(provider, model);
     slot.successCount++;
-    
-    // Reset failure count on success (gradual recovery)
+
     if (slot.failureCount > 0) {
       slot.failureCount = Math.max(0, slot.failureCount - 1);
     }
-    
-    // Reset rate limit backoff count on success
+
     if (slot.rateLimitBackoffCount > 0) {
       slot.rateLimitBackoffCount = 0;
       slot.rateLimitBaseRetryAfter = this.config.rateLimit.defaultRetryAfter;
     }
-    
+
     this.logger.debug(
       `[ModelPoolManager] Success marked for ${provider},${model} ` +
       `(success count: ${slot.successCount}, failure count: ${slot.failureCount})`
     );
   }
 
-  /**
-   * Get an available model from a list of alternatives
-   */
   getAvailableModel(
     preferredModel: string,
     alternatives: Array<{ provider: string; model: string }>
   ): string | null {
-    // Check preferred model first
     const [preferredProvider, preferredModelName] = preferredModel.split(',');
     if (this.hasCapacity(preferredProvider, preferredModelName)) {
       return preferredModel;
     }
-    
-    // Check alternatives
+
     for (const alt of alternatives) {
       if (this.hasCapacity(alt.provider, alt.model)) {
         this.logger.info(
@@ -607,38 +690,31 @@ export class ModelPoolManager {
         return `${alt.provider},${alt.model}`;
       }
     }
-    
+
     return null;
   }
 
-  /**
-   * Get all available alternatives from a list, filtering out rate-limited and circuit-open models
-   */
   getAvailableAlternatives(
     alternatives: Array<{ provider: string; model: string }>,
     priority?: number
   ): Array<{ provider: string; model: string }> {
     const available: Array<{ provider: string; model: string }> = [];
-    
+
     for (const alt of alternatives) {
-      // Check if this alternative is available
       if (this.hasCapacity(alt.provider, alt.model)) {
         available.push(alt);
       }
     }
-    
+
     return available;
   }
 
-  /**
-   * Get status of all model slots
-   */
   getStatus(): Record<string, any> {
     const status: Record<string, any> = {};
-    
+
     for (const [key, slot] of this.slots.entries()) {
       const effectiveCapacity = slot.maxConcurrent - slot.activeRequests - slot.reservedRequests - slot.reservedForQueue;
-      
+
       status[key] = {
         activeRequests: slot.activeRequests,
         reservedRequests: slot.reservedRequests,
@@ -664,16 +740,13 @@ export class ModelPoolManager {
         lastUsed: new Date(slot.lastUsed).toISOString(),
       };
     }
-    
+
     return status;
   }
 
-  /**
-   * Get queue status
-   */
   getQueueStatus(): Record<string, any> {
     const queueStatus: Record<string, any> = {};
-    
+
     for (const [key, slot] of this.slots.entries()) {
       if (slot.queuedRequests.length > 0) {
         queueStatus[key] = {
@@ -687,26 +760,20 @@ export class ModelPoolManager {
         };
       }
     }
-    
+
     return queueStatus;
   }
 
-  /**
-   * Reset all circuit breakers
-   */
   resetCircuitBreakers(): void {
     for (const slot of this.slots.values()) {
       slot.circuitBreakerOpen = false;
       slot.circuitBreakerOpenUntil = undefined;
       slot.failureCount = 0;
     }
-    
+
     this.logger.info('[ModelPoolManager] All circuit breakers reset');
   }
 
-  /**
-   * Clear all queued requests
-   */
   clearQueue(): void {
     for (const slot of this.slots.values()) {
       for (const request of slot.queuedRequests) {
@@ -714,16 +781,14 @@ export class ModelPoolManager {
           clearTimeout(request.timeoutId);
         }
         request.reject(new Error('Queue cleared'));
+        this.queueProcessCallbacks.delete(request.id);
       }
       slot.queuedRequests = [];
     }
-    
+
     this.logger.info('[ModelPoolManager] All queues cleared');
   }
 
-  /**
-   * Get configuration
-   */
   getConfig(): ModelPoolConfig {
     return { ...this.config };
   }

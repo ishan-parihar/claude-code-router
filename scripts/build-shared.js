@@ -17,14 +17,14 @@ try {
 
   // Generate type declaration files
   console.log('Generating type declaration files...');
-  execSync('tsc --emitDeclarationOnly', {
+  execSync('npx tsc --emitDeclarationOnly', {
     stdio: 'inherit',
     cwd: sharedDir
   });
 
   // Build the shared package
   console.log('Building shared package...');
-  execSync('esbuild src/index.ts --bundle --platform=node --minify --tree-shaking=true --outfile=dist/index.js', {
+  execSync('npx esbuild src/index.ts --bundle --platform=node --minify --tree-shaking=true --outfile=dist/index.js', {
     stdio: 'inherit',
     cwd: sharedDir
   });

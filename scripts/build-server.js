@@ -18,7 +18,7 @@ try {
 
   // Generate type declaration files
   console.log('Generating type declaration files...');
-  execSync('tsc --emitDeclarationOnly', {
+  execSync('npx tsc --emitDeclarationOnly', {
     stdio: 'inherit',
     cwd: serverDir
   });
