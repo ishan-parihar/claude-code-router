@@ -1,5 +1,5 @@
 {
-  "name": "@CCR/cli",
+  "name": "@ishan-parihar/cli",
   "version": "2.0.0",
   "description": "CLI for Claude Code Router",
   "bin": {
@@ -15,7 +15,7 @@
     "router",
     "cli"
   ],
-  "author": "musistudio",
+  "author": "ishan-parihar",
   "license": "MIT",
   "dependencies": {
     "@inquirer/prompts": "^5.0.0",
@@ -28,8 +28,8 @@
     "shell-quote": "^1.8.2"
   },
   "devDependencies": {
-    "@CCR/server": "workspace:*",
-    "@CCR/shared": "workspace:*",
+    "@ishan-parihar/server": "workspace:*",
+    "@ishan-parihar/shared": "workspace:*",
     "@types/archiver": "^7.0.0",
     "@types/node": "^24.0.15",
     "@types/shell-quote": "^1.7.3",

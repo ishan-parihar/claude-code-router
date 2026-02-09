@@ -8,7 +8,7 @@ import * as path from 'path';
 import JSON5 from 'json5';
 import { exportPresetCli } from './export';
 import { installPresetCli, loadPreset } from './install';
-import { HOME_DIR } from '@CCR/shared';
+import { HOME_DIR } from '@ishan-parihar/shared';
 
 // ANSI color codes
 const RESET = "\x1B[0m";

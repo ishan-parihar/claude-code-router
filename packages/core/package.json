@@ -1,5 +1,5 @@
 {
-  "name": "@musistudio/llms",
+  "name": "@ishan-parihar/llms",
   "version": "1.0.51",
   "description": "A universal LLM API transformation server",
   "main": "dist/cjs/server.cjs",
@@ -35,7 +35,7 @@
     "transformer",
     "api"
   ],
-  "author": "musistudio",
+  "author": "ishan-parihar",
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.54.0",
@@ -55,7 +55,7 @@
     "uuid": "^11.1.0"
   },
   "devDependencies": {
-    "@CCR/shared": "workspace:*",
+    "@ishan-parihar/shared": "workspace:*",
     "@types/node": "^24.0.15",
     "esbuild": "^0.25.1",
     "tsx": "^4.20.3",

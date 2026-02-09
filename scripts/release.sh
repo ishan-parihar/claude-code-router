@@ -2,12 +2,12 @@
 set -e
 
 # 发布脚本
-# - Core 包作为 @musistudio/llms npm 包发布
-# - CLI 包作为 @CCR/cli npm 包发布
+# - Core 包作为 @ishan-parihar/llms npm 包发布
+# - CLI 包作为 @ishan-parihar/ccr npm 包发布
 # - Server 包发布为 Docker 镜像
 
 VERSION=$(node -p "require('../packages/cli/package.json').version")
-IMAGE_NAME="ccr/router"
+IMAGE_NAME="ishan-parihar/ccr"
 IMAGE_TAG="${VERSION}"
 LATEST_TAG="latest"
 
@@ -38,12 +38,12 @@ case "$PUBLISH_TYPE" in
 esac
 
 # ===========================
-# 发布 Core npm 包 (@musistudio/llms)
+# 发布 Core npm 包 (@ishan-parihar/llms)
 # ===========================
 publish_core_npm() {
   echo ""
   echo "========================================="
-  echo "发布 npm 包 @musistudio/llms"
+  echo "发布 npm 包 @ishan-parihar/llms"
   echo "========================================="
 
   # 检查是否已登录 npm
@@ -66,7 +66,7 @@ publish_core_npm() {
 
   echo ""
   echo "✅ Core npm 包发布成功!"
-  echo "   包名: @musistudio/llms@${CORE_VERSION}"
+  echo "   包名: @ishan-parihar/llms@${CORE_VERSION}"
 }
 
 # ===========================
@@ -75,7 +75,7 @@ publish_core_npm() {
 publish_npm() {
   echo ""
   echo "========================================="
-  echo "发布 npm 包 @CCR/cli"
+  echo "发布 npm 包 @ishan-parihar/ccr"
   echo "========================================="
 
   # 检查是否已登录 npm
@@ -93,14 +93,14 @@ publish_npm() {
   # 创建临时的发布用 package.json
   node -e "
     const pkg = require('../packages/cli/package.json');
-    pkg.name = '@CCR/cli';
+    pkg.name = '@ishan-parihar/ccr';
     delete pkg.scripts;
     pkg.files = ['dist/*', 'README.md', 'LICENSE'];
     pkg.dependencies = {};
     // 移除 workspace 依赖
-    delete pkg.dependencies['@CCR/shared'];
-    delete pkg.dependencies['@CCR/server'];
-    pkg.dependencies['@musistudio/llms'] = require('../packages/server/package.json').dependencies['@musistudio/llms'];
+    delete pkg.dependencies['@ishan-parihar/shared'];
+    delete pkg.dependencies['@ishan-parihar/server'];
+    pkg.dependencies['@ishan-parihar/llms'] = require('../packages/server/package.json').dependencies['@ishan-parihar/llms'];
     pkg.peerDependencies = {
       'node': '>=18.0.0'
     };
@@ -128,7 +128,7 @@ publish_npm() {
 
   echo ""
   echo "✅ npm 包发布成功!"
-  echo "   包名: @CCR/cli@${VERSION}"
+  echo "   包名: @ishan-parihar/ccr@${VERSION}"
 }
 
 # ===========================

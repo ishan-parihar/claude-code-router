@@ -17,6 +17,30 @@ export interface SSEStreamManagerOptions {
   backpressureTimeoutMs?: number;
   /** Maximum idle time before considering connection dead (default: 120000) */
   maxIdleTimeMs?: number;
+  /** Enable staggered streaming detection (default: true) */
+  enableStaggeredDetection?: boolean;
+  /** Maximum acceptable delay between chunks in milliseconds (default: 10000) */
+  maxInterChunkDelayMs?: number;
+  /** Minimum token rate (tokens/second) before considering stream stalled (default: 1) */
+  minTokenRate?: number;
+  /** Callback invoked when staggered streaming is detected */
+  onStaggeredDetected?: (info: StaggeredStreamInfo) => void;
+}
+
+/**
+ * Information about a detected staggered stream
+ */
+export interface StaggeredStreamInfo {
+  /** Time since last chunk in milliseconds */
+  delayMs: number;
+  /** Current token rate (tokens/second) */
+  tokenRate: number;
+  /** Total chunks received */
+  chunkCount: number;
+  /** Time stream has been active */
+  streamDurationMs: number;
+  /** Timestamp when detected */
+  detectedAt: number;
 }
 
 /**
@@ -25,12 +49,19 @@ export interface SSEStreamManagerOptions {
  * - Connection monitoring via close/error events
  * - Backpressure handling for slow clients
  * - Abort signal integration for cancellation
+ * - Staggered streaming detection for irregular chunk delivery
  */
 export class SSEStreamManager {
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private staggeredCheckTimer: NodeJS.Timeout | null = null;
   private lastActivity: number = Date.now();
+  private lastChunkTime: number = Date.now();
   private isConnected: boolean = true;
   private abortController: AbortController;
+  private chunkCount: number = 0;
+  private tokenCount: number = 0;
+  private streamStartTime: number = Date.now();
+  private staggeredDetected: boolean = false;
 
   private raw: NodeJS.WritableStream | null = null;
   private controller: ReadableStreamDefaultController<any> | null = null;
@@ -40,6 +71,8 @@ export class SSEStreamManager {
     private options: SSEStreamManagerOptions = {}
   ) {
     this.abortController = new AbortController();
+    this.streamStartTime = Date.now();
+    this.lastChunkTime = Date.now();
     
     if (this.isNodeStream(target)) {
       this.raw = target;
@@ -49,6 +82,7 @@ export class SSEStreamManager {
     }
     
     this.startHeartbeat();
+    this.startStaggeredDetection();
   }
 
   private isNodeStream(target: any): target is NodeJS.WritableStream {
@@ -120,6 +154,77 @@ export class SSEStreamManager {
   }
 
   /**
+   * Start staggered streaming detection
+   * Monitors inter-chunk delays and token rates
+   */
+  private startStaggeredDetection(): void {
+    if (this.options.enableStaggeredDetection === false) return;
+
+    const checkInterval = 2000; // Check every 2 seconds
+    const maxDelay = this.options.maxInterChunkDelayMs || 10000;
+
+    this.staggeredCheckTimer = setInterval(() => {
+      if (!this.isConnected || this.staggeredDetected) return;
+
+      const now = Date.now();
+      const delaySinceLastChunk = now - this.lastChunkTime;
+      const streamDuration = now - this.streamStartTime;
+
+      // Only check after we've received some chunks and stream has been active
+      if (this.chunkCount < 3 || streamDuration < 5000) return;
+
+      // Check if delay exceeds threshold
+      if (delaySinceLastChunk > maxDelay) {
+        const tokenRate = this.calculateTokenRate();
+        const minRate = this.options.minTokenRate || 1;
+
+        // Only flag if token rate is also below minimum (indicating stall, not just slow model)
+        if (tokenRate < minRate) {
+          this.staggeredDetected = true;
+          const info: StaggeredStreamInfo = {
+            delayMs: delaySinceLastChunk,
+            tokenRate,
+            chunkCount: this.chunkCount,
+            streamDurationMs: streamDuration,
+            detectedAt: now
+          };
+
+          console.warn(`[SSEStreamManager] Staggered streaming detected: ${delaySinceLastChunk}ms since last chunk, ${tokenRate.toFixed(2)} tokens/sec`);
+
+          if (this.options.onStaggeredDetected) {
+            this.options.onStaggeredDetected(info);
+          }
+        }
+      }
+    }, checkInterval);
+  }
+
+  /**
+   * Stop staggered detection timer
+   */
+  private stopStaggeredDetection(): void {
+    if (this.staggeredCheckTimer) {
+      clearInterval(this.staggeredCheckTimer);
+      this.staggeredCheckTimer = null;
+    }
+  }
+
+  /**
+   * Calculate current token rate (tokens per second)
+   */
+  private calculateTokenRate(): number {
+    const duration = (Date.now() - this.streamStartTime) / 1000;
+    return duration > 0 ? this.tokenCount / duration : 0;
+  }
+
+  /**
+   * Update token count for rate calculation
+   */
+  updateTokenCount(count: number): void {
+    this.tokenCount += count;
+  }
+
+  /**
    * Write data to the stream with backpressure handling
    * @returns Promise resolving to true if successful, false otherwise
    */
@@ -129,6 +234,8 @@ export class SSEStreamManager {
     }
 
     this.lastActivity = Date.now();
+    this.lastChunkTime = Date.now();
+    this.chunkCount++;
 
     // Handle Web Stream Controller
     if (this.controller) {
@@ -191,6 +298,7 @@ export class SSEStreamManager {
    */
   async end(): Promise<void> {
     this.stopHeartbeat();
+    this.stopStaggeredDetection();
     
     if (this.controller) {
       try {

@@ -14,7 +14,7 @@ import {
   getDefaultValue,
   sortFieldsByDependencies,
   getAffectedFields,
-} from '@CCR/shared';
+} from '@ishan-parihar/shared';
 import input from '@inquirer/input';
 import confirm from '@inquirer/confirm';
 import select from '@inquirer/select';

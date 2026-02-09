@@ -1306,6 +1306,9 @@ async function formatResponse(response: any, reply: FastifyReply, body: any, log
   const heartbeatIntervalMs = streamingConfig.sseHeartbeatIntervalMs || 30000;
   const enableKeepalive = streamingConfig.sseEnableKeepalive !== false;
   const backpressureTimeoutMs = streamingConfig.sseBackpressureTimeoutMs || 10000;
+  const enableStaggeredDetection = streamingConfig.sseEnableStaggeredDetection !== false;
+  const maxInterChunkDelayMs = streamingConfig.sseMaxInterChunkDelayMs || 10000;
+  const minTokenRate = streamingConfig.sseMinTokenRate || 1;
   
   // Scenario-aware read timeouts
   const scenarioTimeouts: Record<string, number> = {
@@ -1344,7 +1347,14 @@ async function formatResponse(response: any, reply: FastifyReply, body: any, log
     const streamManager = new SSEStreamManager(streamController!, {
       heartbeatIntervalMs,
       enableKeepalive,
-      backpressureTimeoutMs
+      backpressureTimeoutMs,
+      enableStaggeredDetection,
+      maxInterChunkDelayMs,
+      minTokenRate,
+      onStaggeredDetected: (info) => {
+        logger?.warn(`[Stream] Staggered streaming detected for request: ${info.delayMs}ms delay, ${info.tokenRate.toFixed(2)} tokens/sec`);
+        // Could trigger retry/failover here in the future
+      }
     });
     streamManagerRef = streamManager;
 

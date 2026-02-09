@@ -21,6 +21,12 @@ export interface StreamingConfig {
   sseBackpressureTimeoutMs?: number;
   /** Read timeout in milliseconds (default: 60000) */
   sseReadTimeoutMs?: number;
+  /** Enable staggered streaming detection (default: true) */
+  sseEnableStaggeredDetection?: boolean;
+  /** Maximum acceptable delay between chunks in milliseconds (default: 10000) */
+  sseMaxInterChunkDelayMs?: number;
+  /** Minimum token rate (tokens/second) before considering stream stalled (default: 1) */
+  sseMinTokenRate?: number;
 }
 
 export interface AppConfig {

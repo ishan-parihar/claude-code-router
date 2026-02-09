@@ -1,5 +1,5 @@
 {
-  "name": "@CCR/server",
+  "name": "@ishan-parihar/server",
   "version": "2.0.0",
   "description": "Server for Claude Code Router",
   "main": "dist/index.js",
@@ -14,12 +14,12 @@
     "router",
     "server"
   ],
-  "author": "musistudio",
+  "author": "ishan-parihar",
   "license": "MIT",
   "dependencies": {
     "@fastify/multipart": "^9.0.0",
     "@fastify/static": "^8.2.0",
-    "@musistudio/llms": "workspace:*",
+    "@ishan-parihar/llms": "workspace:*",
     "adm-zip": "^0.5.16",
     "dotenv": "^16.4.7",
     "json5": "^2.2.3",
@@ -30,7 +30,7 @@
     "uuid": "^11.1.0"
   },
   "devDependencies": {
-    "@CCR/shared": "workspace:*",
+    "@ishan-parihar/shared": "workspace:*",
     "@types/adm-zip": "^0.5.7",
     "@types/node": "^24.0.15",
     "esbuild": "^0.25.1",

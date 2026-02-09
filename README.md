@@ -47,7 +47,7 @@ This fork adds significant enhancements to the original project:
 ### Installation
 
 ```shell
-npm install -g @musistudio/claude-code-router
+npm install -g @ishan-parihar/ccr
 ```
 
 ### Basic Configuration

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  DOCKER_IMAGE: musistudio/claude-code-router
+  DOCKER_IMAGE: ishan-parihar/ccr
 
 jobs:
   build-and-push:

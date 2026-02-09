@@ -1,5 +1,5 @@
 {
-  "name": "@CCR/shared",
+  "name": "@ishan-parihar/shared",
   "version": "2.0.0",
   "description": "Shared utilities and constants for Claude Code Router",
   "main": "dist/index.js",
@@ -13,7 +13,7 @@
     "router",
     "shared"
   ],
-  "author": "musistudio",
+  "author": "ishan-parihar",
   "license": "MIT",
   "dependencies": {
     "adm-zip": "^0.5.16",

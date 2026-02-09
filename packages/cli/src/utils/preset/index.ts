@@ -4,7 +4,7 @@
  */
 
 // 从 shared 包重新导出类型和核心功能
-export * from '@CCR/shared';
+export * from '@ishan-parihar/shared';
 
 // 导出 CLI 特定的功能（带交互）
 export { exportPresetCli } from './export';
