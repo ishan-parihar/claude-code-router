@@ -1,0 +1,103 @@
+{
+  "PORT": 3456,
+  "HOST": "127.0.0.1",
+  "providers": [
+    {
+      "name": "iflow",
+      "api_base_url": "https://api.iflow.com/v1",
+      "api_key": "your-iflow-api-key",
+      "models": ["glm-4.7", "glm-4.6", "minimax-m2.1"],
+      "headers": {
+        "User-Agent": "iFlow-Cli",
+        "X-Client-Type": "iflow-cli",
+        "X-Client-Version": "0.3.26"
+      }
+    },
+    {
+      "name": "iflow-backup",
+      "api_base_url": "https://api.iflow-backup.com/v1",
+      "api_key": "your-iflow-backup-api-key",
+      "models": ["glm-4.7", "glm-4.6"],
+      "headers": {
+        "User-Agent": "iFlow-Cli",
+        "X-Client-Type": "iflow-cli",
+        "X-Client-Version": "0.3.26"
+      }
+    },
+    {
+      "name": "openai",
+      "api_base_url": "https://api.openai.com/v1",
+      "api_key": "your-openai-api-key",
+      "models": ["gpt-4", "gpt-3.5-turbo"]
+    },
+    {
+      "name": "anthropic",
+      "api_base_url": "https://api.anthropic.com/v1",
+      "api_key": "your-anthropic-api-key",
+      "models": ["claude-3-opus", "claude-3-sonnet"],
+      "transformer": {
+        "use": ["Anthropic"]
+      }
+    }
+  ],
+  "failover": {
+    "iflow": [
+      "iflow-backup",
+      { "provider": "openai", "model": "gpt-4" },
+      { "provider": "anthropic", "model": "claude-3-opus" }
+    ],
+    "iflow-backup": [
+      { "provider": "iflow", "model": "glm-4.7" },
+      { "provider": "openai", "model": "gpt-4" }
+    ],
+    "openai": [
+      { "provider": "anthropic", "model": "claude-3-opus" },
+      { "provider": "iflow", "model": "glm-4.7" }
+    ],
+    "anthropic": [
+      { "provider": "openai", "model": "gpt-4" },
+      { "provider": "iflow", "model": "glm-4.7" }
+    ],
+    "global": [
+      "iflow-backup"
+    ]
+  },
+  "modelPool": {
+    "maxConcurrentPerModel": 2,
+    "circuitBreaker": {
+      "failureThreshold": 5,
+      "cooldownPeriod": 60000,
+      "testRequestAfterCooldown": true
+    },
+    "rateLimit": {
+      "defaultRetryAfter": 60000,
+      "respectRetryAfterHeader": true,
+      "backoffMultiplier": 1.5,
+      "maxBackoff": 300000
+    },
+    "queue": {
+      "maxQueueSize": 100,
+      "queueTimeout": 300000,
+      "priorityLevels": {
+        "high": 10,
+        "normal": 0,
+        "low": -10
+      },
+      "skipRateLimited": true
+    },
+    "priorityFailover": true
+  },
+  "Router": {
+    "default": "iflow,glm-4.7",
+    "think": "iflow,glm-4.6",
+    "longContext": "anthropic,claude-3-opus",
+    "webSearch": "iflow,glm-4.7",
+    "background": "openai,gpt-3.5-turbo"
+  },
+  "transformers": [
+    {
+      "name": "maxToken",
+      "path": "./packages/core/src/transformer/maxtoken.transformer.ts"
+    }
+  ]
+}
