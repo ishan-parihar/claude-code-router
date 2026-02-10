@@ -81,6 +81,69 @@ export const PROVIDER_ERROR_MAPS: Record<
       retryAfter: 60000,
       provider: "iflow",
     },
+    "400": {
+      code: "invalid_request",
+      message: "Invalid request",
+      statusCode: 400,
+      isRetryable: false,
+      provider: "iflow",
+    },
+    "401": {
+      code: "invalid_api_key",
+      message: "Invalid API key or unauthorized",
+      statusCode: 401,
+      isRetryable: false,
+      provider: "iflow",
+    },
+    "403": {
+      code: "permission_denied",
+      message: "Permission denied",
+      statusCode: 403,
+      isRetryable: false,
+      provider: "iflow",
+    },
+    "404": {
+      code: "not_found",
+      message: "Resource not found (check API URL)",
+      statusCode: 404,
+      isRetryable: false,
+      provider: "iflow",
+    },
+    "406": {
+      code: "not_acceptable",
+      message: "Not Acceptable (likely signature or header format rejected)",
+      statusCode: 406,
+      isRetryable: false,
+      provider: "iflow",
+    },
+    "500": {
+      code: "internal_server_error",
+      message: "Internal server error",
+      statusCode: 500,
+      isRetryable: true,
+      provider: "iflow",
+    },
+    "502": {
+      code: "bad_gateway",
+      message: "Bad gateway",
+      statusCode: 502,
+      isRetryable: true,
+      provider: "iflow",
+    },
+    "503": {
+      code: "service_unavailable",
+      message: "Service unavailable",
+      statusCode: 503,
+      isRetryable: true,
+      provider: "iflow",
+    },
+    "504": {
+      code: "gateway_timeout",
+      message: "Gateway timeout",
+      statusCode: 504,
+      isRetryable: true,
+      provider: "iflow",
+    },
   },
   openai: {
     "rate_limit_exceeded": {
@@ -143,13 +206,14 @@ export class ProviderErrorHandler {
     errorBody: any,
     providerType?: string
   ): ProviderError {
-    const lookupKey = providerType 
-      ? providerType.toLowerCase() 
+    const lookupKey = providerType
+      ? providerType.toLowerCase()
       : provider.toLowerCase();
-      
+
     const errorMap = PROVIDER_ERROR_MAPS[lookupKey];
 
     const errorCode =
+      errorBody?.status ||
       errorBody?.error_code ||
       errorBody?.error?.code ||
       errorBody?.code ||
@@ -160,9 +224,23 @@ export class ProviderErrorHandler {
       return { ...errorMap[errorCode], provider };
     }
 
+    // Try to extract a meaningful message
+    const message =
+      errorBody?.message ||
+      errorBody?.error?.message ||
+      errorBody?.msg ||
+      errorBody?.error_msg ||
+      (typeof errorBody === 'string' ? errorBody : undefined) ||
+      "Unknown error";
+
+    // If we still have the default "Unknown error" and have a body, append it for debugging
+    const finalMessage = message === "Unknown error" && errorBody
+      ? `Unknown error: ${JSON.stringify(errorBody)}`
+      : message;
+
     return {
       code: "unknown_error",
-      message: errorBody?.message || errorBody?.error?.message || "Unknown error",
+      message: finalMessage,
       statusCode,
       isRetryable: statusCode >= 500 || statusCode === 429,
       provider: provider,
@@ -257,7 +335,7 @@ export class ProviderErrorHandler {
       case "invalid_request":
         return `Invalid request: ${error.message}. Please check your request parameters.`;
       default:
-        return `Error from ${error.provider}: ${error.message} (code: ${error.code})`;
+        return `Error from ${error.provider}: ${error.message} (code: ${error.code}, status: ${error.statusCode})`;
     }
   }
 }

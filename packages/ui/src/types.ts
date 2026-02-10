@@ -9,6 +9,7 @@ export interface Provider {
   api_key: string;
   models: string[];
   transformer?: ProviderTransformer;
+  headers?: Record<string, string>;
 }
 
 export interface FailoverInstance {

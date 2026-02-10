@@ -1,13 +1,15 @@
 import { useTranslation } from "react-i18next";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { useConfig } from "./ConfigProvider";
 import { Combobox } from "./ui/combobox";
 import { FailoverConfig } from "./FailoverConfig";
 import { useState } from "react";
+import { api } from "@/lib/api";
 
-export function Router() {
+export function Router({ showToast }: { showToast: (message: string, type: 'success' | 'error' | 'warning') => void }) {
   const { t } = useTranslation();
   const { config, setConfig } = useConfig();
 
@@ -24,6 +26,16 @@ export function Router() {
       </Card>
     );
   }
+
+  const handleSave = async () => {
+    try {
+      await api.updateConfig(config);
+      showToast(t('app.config_saved_success'), 'success');
+    } catch (error) {
+      console.error('Failed to save router config:', error);
+      showToast(t('app.config_saved_failed') + ': ' + (error as Error).message, 'error');
+    }
+  };
 
   // Handle case where config.Router is null or undefined
   const routerConfig = config.Router || {
@@ -194,6 +206,11 @@ export function Router() {
           )}
         </div>
       </CardContent>
+      <CardFooter className="border-t p-4">
+        <Button onClick={handleSave} className="transition-all-ease hover:scale-[1.02] active:scale-[0.98]">
+          {t("app.save")}
+        </Button>
+      </CardFooter>
     </Card>
   );
 }

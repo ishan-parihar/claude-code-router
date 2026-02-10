@@ -15,7 +15,16 @@ export class RequestSigner {
   ) {}
 
   sign(headers: Record<string, string>, body?: any): Record<string, string> {
-    const timestamp = Date.now().toString();
+    const timestampMs = Date.now();
+    const timestamp = timestampMs.toString();
+    
+    // Ensure session-id header exists for iflow
+    if (this.config.headerName === 'x-iflow-signature') {
+      if (!headers['session-id']) {
+        headers['session-id'] = '';
+      }
+    }
+    
     const signature = this.generateSignature(headers, body, timestamp);
 
     return {
@@ -65,6 +74,15 @@ export class RequestSigner {
     });
 
     const data = [...fieldValues, timestamp].join(":");
+    
+    // Debug logging for iflow signature
+    if (this.config.headerName === 'x-iflow-signature') {
+      console.log(`[Signature Debug] Generating signature for iflow:`);
+      console.log(`[Signature Debug] Data: "${data}"`);
+      console.log(`[Signature Debug] Timestamp: ${timestamp}`);
+      console.log(`[Signature Debug] Fields: ${JSON.stringify(fieldValues)}`);
+      console.log(`[Signature Debug] Headers keys: ${Object.keys(headers).join(', ')}`);
+    }
 
     return crypto.createHmac("sha256", this.apiKey).update(data, "utf8").digest("hex");
   }

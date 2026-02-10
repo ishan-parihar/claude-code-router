@@ -70,7 +70,9 @@ export class HeaderManager {
 
     // Add stream header if applicable
     if (context.isStream) {
-      headers["Accept"] = "text/event-stream";
+      headers["accept"] = "text/event-stream";
+    } else {
+      headers["accept"] = "application/json";
     }
 
     // Apply custom headers (override defaults)

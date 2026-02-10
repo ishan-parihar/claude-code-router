@@ -98,7 +98,7 @@ function createApp(options: FastifyServerOptions = {}): FastifyInstance {
 
 // Server class
 class Server {
-  private app: FastifyInstance;
+  private _app: FastifyInstance;
   configService: ConfigService;
   providerService!: ProviderService;
   transformerService: TransformerService;
@@ -109,24 +109,24 @@ class Server {
 
   constructor(options: ServerOptions = {}) {
     const { initialConfig, ...fastifyOptions } = options;
-    this.app = createApp({
+    this._app = createApp({
       ...fastifyOptions,
       logger: fastifyOptions.logger ?? true,
     });
     this.configService = new ConfigService(options);
     this.transformerService = new TransformerService(
       this.configService,
-      this.app.log
+      this._app.log
     );
     this.tokenizerService = new TokenizerService(
       this.configService,
-      this.app.log
+      this._app.log
     );
-    this.modelPoolManager = new ModelPoolManager(this.configService, this.app.log);
+    this.modelPoolManager = new ModelPoolManager(this.configService, this._app.log);
     this.modelSelector = new ModelSelector(
       this.modelPoolManager,
       this.configService,
-      this.app.log
+      this._app.log
     );
     this.endpointGroupManager = new EndpointGroupManager(
       {
@@ -135,13 +135,13 @@ class Server {
         strategy: this.configService.get('endpointRateLimiting.strategy') || 'least-loaded',
         providerWeights: this.configService.get('endpointRateLimiting.providerWeights') || {},
       },
-      this.app.log
+      this._app.log
     );
     this.transformerService.initialize().finally(() => {
       this.providerService = new ProviderService(
         this.configService,
         this.transformerService,
-        this.app.log
+        this._app.log
       );
       // Register all providers with endpoint group manager
       const providers = this.providerService.getProviders();
@@ -155,7 +155,7 @@ class Server {
     });
     // Initialize tokenizer service
     this.tokenizerService.initialize().catch((error) => {
-      this.app.log.error(`Failed to initialize TokenizerService: ${error}`);
+      this._app.log.error(`Failed to initialize TokenizerService: ${error}`);
     });
   }
 
@@ -163,7 +163,7 @@ class Server {
     plugin: FastifyPluginAsync<Options> | FastifyPluginCallback<Options>,
     options?: FastifyRegisterOptions<Options>
   ): Promise<void> {
-    await (this.app as any).register(plugin, options);
+    await (this._app as any).register(plugin, options);
   }
 
   addHook(hookName: "onRequest", hookFunction: onRequestHookHandler): void;
@@ -187,13 +187,13 @@ class Server {
   addHook(hookName: "onListen", hookFunction: onListenHookHandler): void;
   addHook(hookName: "onClose", hookFunction: onCloseHookHandler): void;
   public addHook(hookName: string, hookFunction: any): void {
-    this.app.addHook(hookName as any, hookFunction);
+    this._app.addHook(hookName as any, hookFunction);
   }
 
   public async registerNamespace(name: string, options?: any) {
     if (!name) throw new Error("name is required");
     if (name === '/') {
-      await this.app.register(async (fastify) => {
+      await this._app.register(async (fastify) => {
         fastify.decorate('configService', this.configService);
         fastify.decorate('transformerService', this.transformerService);
         fastify.decorate('providerService', this.providerService);
@@ -226,22 +226,22 @@ class Server {
     });
     const transformerService = new TransformerService(
       configService,
-      this.app.log
+      this._app.log
     );
     await transformerService.initialize();
     const providerService = new ProviderService(
       configService,
       transformerService,
-      this.app.log
+      this._app.log
     );
     const tokenizerService = new TokenizerService(
       configService,
-      this.app.log
+      this._app.log
     );
     await tokenizerService.initialize();
-    const modelPoolManager = new ModelPoolManager(configService, this.app.log);
-    const modelSelector = new ModelSelector(modelPoolManager, configService, this.app.log);
-    await this.app.register(async (fastify) => {
+    const modelPoolManager = new ModelPoolManager(configService, this._app.log);
+    const modelSelector = new ModelSelector(modelPoolManager, configService, this._app.log);
+    await this._app.register(async (fastify) => {
       fastify.decorate('configService', configService);
       fastify.decorate('transformerService', transformerService);
       fastify.decorate('providerService', providerService);
@@ -267,9 +267,9 @@ class Server {
 
   async start(): Promise<void> {
     try {
-      this.app._server = this;
+      this._app._server = this;
 
-      this.app.addHook("preHandler", (req, reply, done) => {
+      this._app.addHook("preHandler", (req, reply, done) => {
         const url = new URL(`http://127.0.0.1${req.url}`);
         if ((url.pathname.endsWith("/v1/messages") || url.pathname.endsWith("/v1/chat/completions")) && req.body) {
           const body = req.body as any;
@@ -283,7 +283,7 @@ class Server {
 
       await this.registerNamespace('/')
 
-      this.app.addHook(
+      this._app.addHook(
         "preHandler",
         async (req: FastifyRequest, reply: FastifyReply) => {
           const url = new URL(`http://127.0.0.1${req.url}`);
@@ -315,25 +315,30 @@ class Server {
       );
 
 
-      const address = await this.app.listen({
+      const address = await this._app.listen({
         port: parseInt(this.configService.get("PORT") || "3000", 10),
         host: this.configService.get("HOST") || "127.0.0.1",
       });
 
-      this.app.log.info(`🚀 LLMs API server listening on ${address}`);
+      this._app.log.info(`🚀 LLMs API server listening on ${address}`);
 
       const shutdown = async (signal: string) => {
-        this.app.log.info(`Received ${signal}, shutting down gracefully...`);
-        await this.app.close();
+        this._app.log.info(`Received ${signal}, shutting down gracefully...`);
+        await this._app.close();
         process.exit(0);
       };
 
       process.on("SIGINT", () => shutdown("SIGINT"));
       process.on("SIGTERM", () => shutdown("SIGTERM"));
     } catch (error) {
-      this.app.log.error(`Error starting server: ${error}`);
+      this._app.log.error(`Error starting server: ${error}`);
       process.exit(1);
     }
+  }
+
+  // Public getter to access the Fastify app instance
+  get app(): FastifyInstance {
+    return this._app;
   }
 }
 

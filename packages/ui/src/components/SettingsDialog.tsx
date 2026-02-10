@@ -15,13 +15,15 @@ import { useConfig } from "./ConfigProvider";
 import { StatusLineConfigDialog } from "./StatusLineConfigDialog";
 import { useState } from "react";
 import type { StatusLineConfig } from "@/types";
+import { api } from "@/lib/api";
 
 interface SettingsDialogProps {
   isOpen: boolean;
   onOpenChange: (isOpen: boolean) => void;
+  showToast: (message: string, type: 'success' | 'error' | 'warning') => void;
 }
 
-export function SettingsDialog({ isOpen, onOpenChange }: SettingsDialogProps) {
+export function SettingsDialog({ isOpen, onOpenChange, showToast }: SettingsDialogProps) {
   const { t } = useTranslation();
   const { config, setConfig } = useConfig();
   const [isStatusLineConfigOpen, setIsStatusLineConfigOpen] = useState(false);
@@ -29,6 +31,17 @@ export function SettingsDialog({ isOpen, onOpenChange }: SettingsDialogProps) {
   if (!config) {
     return null;
   }
+
+  const handleSave = async () => {
+    try {
+      await api.updateConfig(config);
+      showToast(t('app.config_saved_success'), 'success');
+      onOpenChange(false);
+    } catch (error) {
+      console.error('Failed to save config:', error);
+      showToast(t('app.config_saved_failed') + ': ' + (error as Error).message, 'error');
+    }
+  };
 
   const handleLogChange = (checked: boolean) => {
     setConfig({ ...config, LOG: checked });
@@ -230,7 +243,7 @@ export function SettingsDialog({ isOpen, onOpenChange }: SettingsDialogProps) {
         </div>
         <DialogFooter className="p-4 pt-0">
           <Button
-            onClick={() => onOpenChange(false)}
+            onClick={handleSave}
             className="transition-all-ease hover:scale-[1.02] active:scale-[0.98]"
           >
             {t("app.save")}

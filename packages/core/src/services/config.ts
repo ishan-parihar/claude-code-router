@@ -27,6 +27,8 @@ export interface StreamingConfig {
   sseMaxInterChunkDelayMs?: number;
   /** Minimum token rate (tokens/second) before considering stream stalled (default: 1) */
   sseMinTokenRate?: number;
+  /** Maximum number of stream retries for connection errors (default: 2) */
+  sseMaxRetries?: number;
 }
 
 export interface AppConfig {

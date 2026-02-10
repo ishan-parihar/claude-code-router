@@ -285,7 +285,33 @@ async function handleSinglePath(
       `[Routes] Single path completed successfully (requestId: ${requestId}, duration: ${Date.now() - pathStartTime}ms)`
     );
 
-    return await formatResponse(finalResponse, reply, body, req.log, fastify.configService.getAll(), req.scenarioType);
+    return await formatResponse(
+      finalResponse,
+      reply,
+      body,
+      req.log,
+      fastify.configService.getAll(),
+      req.scenarioType,
+      {
+        originalRequest: body,
+        provider: req.provider,
+        sendRequestFn: async () => {
+          const retryResponse = await sendRequestToProvider(
+            body,
+            {},
+            fastify.providerService.getProvider(req.provider!),
+            fastify,
+            false,
+            transformer,
+            { req }
+          );
+          if (!retryResponse.ok) {
+            throw new Error(`Retry request failed: ${retryResponse.status}`);
+          }
+          return retryResponse;
+        }
+      }
+    );
   } catch (error: any) {
     // Handle rate limits
     if (isRateLimitError(error)) {
@@ -444,7 +470,33 @@ async function handleEndpointQueuedRequest(
           { req }
         );
 
-        await formatResponse(finalResponse, reply, body, req.log, fastify.configService.getAll(), req.scenarioType);
+        await formatResponse(
+          finalResponse,
+          reply,
+          body,
+          req.log,
+          fastify.configService.getAll(),
+          req.scenarioType,
+          {
+            originalRequest: body,
+            provider: selectedProviderName,
+            sendRequestFn: async () => {
+              const retryResponse = await sendRequestToProvider(
+                body,
+                {},
+                fastify.providerService.getProvider(selectedProviderName),
+                fastify,
+                false,
+                transformer,
+                { req }
+              );
+              if (!retryResponse.ok) {
+                throw new Error(`Retry request failed: ${retryResponse.status}`);
+              }
+              return retryResponse;
+            }
+          }
+        );
 
         fastify.modelPoolManager.markSuccess(selectedProviderName, body.model);
         fastify.modelPoolManager.releaseSlot(selectedProviderName, body.model, true);
@@ -559,7 +611,33 @@ async function handleQueuedRequest(
           { req }
         );
 
-        await formatResponse(finalResponse, reply, body, req.log, fastify.configService.getAll(), req.scenarioType);
+        await formatResponse(
+          finalResponse,
+          reply,
+          body,
+          req.log,
+          fastify.configService.getAll(),
+          req.scenarioType,
+          {
+            originalRequest: body,
+            provider: req.provider,
+            sendRequestFn: async () => {
+              const retryResponse = await sendRequestToProvider(
+                body,
+                {},
+                fastify.providerService.getProvider(req.provider!),
+                fastify,
+                false,
+                transformer,
+                { req }
+              );
+              if (!retryResponse.ok) {
+                throw new Error(`Retry request failed: ${retryResponse.status}`);
+              }
+              return retryResponse;
+            }
+          }
+        );
 
         fastify.modelPoolManager.markSuccess(req.provider!, body.model);
         fastify.modelPoolManager.releaseSlot(req.provider!, body.model, true);
@@ -719,7 +797,33 @@ req.log.info(
         provider: candidate.provider,
         model: candidate.model,
         isPrimary: candidate.isPrimary,
-        result: await formatResponse(finalResponse, reply, newBody, req.log, fastify.configService.getAll(), req.scenarioType)
+        result: await formatResponse(
+          finalResponse,
+          reply,
+          newBody,
+          req.log,
+          fastify.configService.getAll(),
+          req.scenarioType,
+          {
+            originalRequest: newBody,
+            provider: candidate.provider,
+            sendRequestFn: async () => {
+              const retryResponse = await sendRequestToProvider(
+                newBody,
+                {},
+                provider,
+                fastify,
+                false,
+                transformer,
+                { req: newReq }
+              );
+              if (!retryResponse.ok) {
+                throw new Error(`Retry request failed: ${retryResponse.status}`);
+              }
+              return retryResponse;
+            }
+          }
+        )
       };
     } catch (fallbackError: any) {
       if (fastify.modelPoolManager) {
@@ -967,7 +1071,33 @@ async function tryAlternativesParallel(
         success: true,
         provider: alternative.provider,
         model: alternative.model,
-        result: await formatResponse(finalResponse, reply, newBody, req.log, fastify.configService.getAll(), req.scenarioType)
+        result: await formatResponse(
+          finalResponse,
+          reply,
+          newBody,
+          req.log,
+          fastify.configService.getAll(),
+          req.scenarioType,
+          {
+            originalRequest: newBody,
+            provider: alternative.provider,
+            sendRequestFn: async () => {
+              const retryResponse = await sendRequestToProvider(
+                newBody,
+                {},
+                provider,
+                fastify,
+                false,
+                transformer,
+                { req: newReq }
+              );
+              if (!retryResponse.ok) {
+                throw new Error(`Retry request failed: ${retryResponse.status}`);
+              }
+              return retryResponse;
+            }
+          }
+        )
       };
     } catch (fallbackError: any) {
       if (fastify.modelPoolManager) {
@@ -1123,6 +1253,13 @@ async function sendRequestToProvider(
     }
   }
 
+  // Apply model-specific configuration for iflow provider (glm-4.7)
+  if ((provider.name === 'iflow' || provider.type === 'iflow') && requestBody.model?.includes('glm-4.7')) {
+    requestBody.temperature = 1;
+    requestBody.top_p = 0.95;
+    console.log(`[iflow Debug] Applied glm-4.7 specific settings: temperature=1, top_p=0.95`);
+  }
+
   // Build headers using HeaderManager
   // Use sessionContext for session tracking (set by session middleware)
   const headerContext = {
@@ -1153,6 +1290,47 @@ async function sendRequestToProvider(
     }
   }
 
+  // Ensure iflow URLs have the correct path
+  if ((provider.name === 'iflow' || provider.type === 'iflow') && !url.pathname.endsWith('/chat/completions')) {
+    url.pathname = url.pathname.replace(/\/$/, '') + '/chat/completions';
+  }
+
+  // Debug logging for iflow provider - log full request details
+  if (provider.name === 'iflow' || provider.type === 'iflow') {
+    const debugInfo = {
+      url: url.toString(),
+      pathname: url.pathname,
+      baseUrl: provider.baseUrl,
+      providerName: provider.name,
+      providerType: provider.type,
+      sessionId: context.req?.sessionContext?.sessionId,
+      conversationId: context.req?.sessionContext?.conversationId,
+      requestId: context.req?.sessionContext?.requestId,
+      hasSessionContext: !!context.req?.sessionContext,
+      headers: requestHeaders,
+      body: requestBody
+    };
+    
+    console.error('[iflow DEBUG] ======================================');
+    console.error('[iflow DEBUG] REQUEST DETAILS');
+    console.error('[iflow DEBUG] ======================================');
+    console.error('[iflow DEBUG] URL:', debugInfo.url);
+    console.error('[iflow DEBUG] Headers:', JSON.stringify(debugInfo.headers, null, 2));
+    console.error('[iflow DEBUG] Body:', JSON.stringify(debugInfo.body, null, 2));
+    console.error('[iflow DEBUG] ======================================');
+    
+    // Also write to file for persistence
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const os = require('os');
+      const logPath = path.join(os.homedir(), '.claude-code-router', 'iflow-debug.log');
+      fs.appendFileSync(logPath, JSON.stringify(debugInfo, null, 2) + '\n\n');
+    } catch (e) {
+      // Ignore file write errors
+    }
+  }
+
   // Execute request with retry logic for provider-specific errors
   const response = await executeWithRetry(
     provider.name,
@@ -1169,8 +1347,18 @@ async function sendRequestToProvider(
         fastify.log
       );
 
-      if (!res.ok) {
+        if (!res.ok) {
         const errorText = await res.text();
+
+        // Debug logging for iflow provider errors
+        if (provider.name === 'iflow' || provider.type === 'iflow') {
+          console.error(`[iflow Debug] ========== ERROR RESPONSE ==========`);
+          console.error(`[iflow Debug] Status: ${res.status}`);
+          console.error(`[iflow Debug] Headers: ${JSON.stringify(Object.fromEntries(res.headers.entries()), null, 2)}`);
+          console.error(`[iflow Debug] Body: ${errorText}`);
+          console.error(`[iflow Debug] ======================================`);
+        }
+
         let errorBody: any;
         try {
           errorBody = JSON.parse(errorText);
@@ -1271,7 +1459,19 @@ async function processResponseTransformers(
   return finalResponse;
 }
 
-async function formatResponse(response: any, reply: FastifyReply, body: any, logger?: any, config?: any, scenarioType?: string) {
+async function formatResponse(
+  response: any,
+  reply: FastifyReply,
+  body: any,
+  logger?: any,
+  config?: any,
+  scenarioType?: string,
+  retryContext?: {
+    originalRequest?: any;
+    provider?: any;
+    sendRequestFn?: () => Promise<Response>;
+  }
+) {
   if (!response.ok) {
     reply.code(response.status);
   }
@@ -1285,16 +1485,8 @@ async function formatResponse(response: any, reply: FastifyReply, body: any, log
   reply.header("Content-Type", "text/event-stream");
   reply.header("Cache-Control", "no-cache");
   reply.header("Connection", "keep-alive");
-  reply.header("X-Accel-Buffering", "no");  // Disable nginx buffering
-  reply.header("Transfer-Encoding", "chunked"); // Explicit chunked encoding for proxies
-  
-  // Also set on raw to ensure they're flushed (Bug A fix)
-  reply.raw.setHeader("Content-Type", "text/event-stream");
-  reply.raw.setHeader("Cache-Control", "no-cache");
-  reply.raw.setHeader("Connection", "keep-alive");
-  reply.raw.setHeader("X-Accel-Buffering", "no");
-  reply.raw.setHeader("Transfer-Encoding", "chunked");
-  reply.raw.flushHeaders();  // Ensure headers are sent to client immediately
+  reply.header("X-Accel-Buffering", "no");
+  reply.header("Transfer-Encoding", "chunked");
 
   // Check for Web Streams API ReadableStream
   if (!response.body || typeof response.body.getReader !== 'function') {
@@ -1309,7 +1501,7 @@ async function formatResponse(response: any, reply: FastifyReply, body: any, log
   const enableStaggeredDetection = streamingConfig.sseEnableStaggeredDetection !== false;
   const maxInterChunkDelayMs = streamingConfig.sseMaxInterChunkDelayMs || 10000;
   const minTokenRate = streamingConfig.sseMinTokenRate || 1;
-  
+
   // Scenario-aware read timeouts
   const scenarioTimeouts: Record<string, number> = {
     think: 300000,      // 5 minutes for reasoning models
@@ -1320,30 +1512,33 @@ async function formatResponse(response: any, reply: FastifyReply, body: any, log
   };
   const readTimeoutMs = (scenarioType && scenarioTimeouts[scenarioType]) || streamingConfig.sseReadTimeoutMs || 60000;
 
-  const reader = response.body.getReader();
-  
+  // Max stream retries for connection errors
+  const maxStreamRetries = streamingConfig.sseMaxRetries || 2;
+
   // Create a TransformStream-like structure to pump data through SSEStreamManager
   // We use a manual ReadableStream to capture the controller
   let streamController: ReadableStreamDefaultController<any>;
   let streamManagerRef: SSEStreamManager | null = null;
-  
+
   const outStream = new ReadableStream({
     start(controller) {
       streamController = controller;
     },
     cancel() {
-      // If Fastify closes the stream (client disconnect), cancel the upstream
-      reader.cancel().catch(() => {});
-      // Signal the SSEStreamManager to stop (Bug G fix)
+      // Signal the SSEStreamManager to stop
       streamManagerRef?.abort();
     }
   });
 
-  // Start the pump process in the background
-  // We don't await this because we want to return the stream to Fastify immediately
-  (async () => {
+  // Stream pump with retry support
+  const pumpStreamWithRetry = async (
+    initialResponse: Response,
+    retryAttempt: number = 0
+  ): Promise<void> => {
+    let reader = initialResponse.body.getReader();
+    let currentResponse = initialResponse;
+
     // Initialize manager with the controller
-    // streamController is guaranteed to be assigned because start() runs synchronously during construction
     const streamManager = new SSEStreamManager(streamController!, {
       heartbeatIntervalMs,
       enableKeepalive,
@@ -1353,12 +1548,11 @@ async function formatResponse(response: any, reply: FastifyReply, body: any, log
       minTokenRate,
       onStaggeredDetected: (info) => {
         logger?.warn(`[Stream] Staggered streaming detected for request: ${info.delayMs}ms delay, ${info.tokenRate.toFixed(2)} tokens/sec`);
-        // Could trigger retry/failover here in the future
       }
     });
     streamManagerRef = streamManager;
 
-    logger?.info(`[Stream] Started for request with heartbeat enabled (interval: ${heartbeatIntervalMs}ms, timeout: ${readTimeoutMs}ms)`);
+    logger?.info(`[Stream] Started for request with heartbeat enabled (interval: ${heartbeatIntervalMs}ms, timeout: ${readTimeoutMs}ms, attempt: ${retryAttempt + 1})`);
 
     try {
       while (streamManager.connected) {
@@ -1387,20 +1581,83 @@ async function formatResponse(response: any, reply: FastifyReply, body: any, log
         }
       }
     } catch (error: any) {
-      if (error.message === 'Aborted' || error.name === 'AbortError') {
+      const errorMessage = error.message || String(error);
+
+      // Check if this is a connection error that can be retried
+      const isConnectionError =
+        errorMessage.includes('Connection reset') ||
+        errorMessage.includes('ECONNRESET') ||
+        errorMessage.includes('ETIMEDOUT') ||
+        errorMessage.includes('ENOTCONN') ||
+        errorMessage.includes('Broken pipe') ||
+        errorMessage.includes('Premature close');
+
+      const isRetryable = isConnectionError && retryAttempt < maxStreamRetries && retryContext?.sendRequestFn;
+
+      if (errorMessage === 'Aborted' || error.name === 'AbortError') {
         logger?.info(`[Stream] Client disconnected`);
-      } else if (error.message === 'Read timeout') {
+      } else if (errorMessage === 'Read timeout') {
         logger?.warn(`[Stream] Timeout waiting for provider data`);
+      } else if (isRetryable) {
+        // Attempt to reconnect
+        logger?.warn(`[Stream] Connection error detected: ${errorMessage}. Attempting retry ${retryAttempt + 1}/${maxStreamRetries}`);
+
+        // Cleanup current reader
+        await reader.cancel().catch(() => {});
+        reader.releaseLock();
+
+        // Wait before retry
+        await new Promise(resolve => setTimeout(resolve, 1000 * (retryAttempt + 1)));
+
+        try {
+          // Make new request to reconnect
+          const newResponse = await retryContext.sendRequestFn();
+
+          if (!newResponse.ok) {
+            logger?.error(`[Stream] Retry request failed with status: ${newResponse.status}`);
+            throw error;
+          }
+
+          if (!newResponse.body || typeof newResponse.body.getReader !== 'function') {
+            logger?.error(`[Stream] Retry response has no readable body`);
+            throw error;
+          }
+
+          logger?.info(`[Stream] Retry successful, resuming stream`);
+
+          // Recursively pump the new stream with incremented retry count
+          await pumpStreamWithRetry(newResponse, retryAttempt + 1);
+          return;
+        } catch (retryError: any) {
+          logger?.error(`[Stream] Retry failed: ${retryError.message}`);
+          throw error;
+        }
       } else {
-        logger?.error(`[Stream] Error: ${error.message}`);
+        logger?.error(`[Stream] Error: ${errorMessage} (retryable: ${isRetryable}, attempts: ${retryAttempt}/${maxStreamRetries})`);
+        throw error;
       }
     } finally {
       // Cleanup
-      // Cancel the reader first to abort any pending reads cleanly (Bug F fix)
       await reader.cancel().catch(() => {});
       reader.releaseLock();
-      await streamManager.end(); // This closes the controller
+      await streamManager.end();
       logger?.info(`[Stream] Ended`);
+    }
+  };
+
+  // Start the pump process in the background
+  // We don't await this because we want to return the stream to Fastify immediately
+  (async () => {
+    try {
+      await pumpStreamWithRetry(response);
+    } catch (error: any) {
+      // Final error handler - stream has failed after all retries
+      logger?.error(`[Stream] Failed after retries: ${error.message}`);
+      // Send error event to client if still connected
+      if (streamManagerRef?.connected) {
+        const errorEvent = `event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`;
+        await streamManagerRef.write(errorEvent).catch(() => {});
+      }
     }
   })();
 

@@ -159,12 +159,12 @@ class ApiClient {
   // API methods for configuration
   // Get current configuration
   async getConfig(): Promise<Config> {
-    return this.get<Config>('/config');
+    return this.get<Config>('/api/config');
   }
 
   // Update entire configuration
   async updateConfig(config: Config): Promise<Config> {
-    return this.post<Config>('/config', config);
+    return this.post<Config>('/api/config', config);
   }
 
   // Get providers
@@ -209,12 +209,12 @@ class ApiClient {
 
   // Get configuration (new endpoint)
   async getConfigNew(): Promise<Config> {
-    return this.get<Config>('/config');
+    return this.get<Config>('/api/config');
   }
 
   // Save configuration (new endpoint)
   async saveConfig(config: Config): Promise<unknown> {
-    return this.post<Config>('/config', config);
+    return this.post<Config>('/api/config', config);
   }
 
   // Restart service

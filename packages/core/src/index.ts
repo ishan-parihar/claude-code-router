@@ -6,6 +6,9 @@
 // Interfaces (Phase 3 Architecture)
 export * from "./interfaces";
 
+// Server
+export { default as Server } from "./server";
+
 // Services
 export { TransformerService } from "./services/transformer";
 export { DecoupledTransformerService, TransformerComponents } from "./services/decoupled-transformer.service";

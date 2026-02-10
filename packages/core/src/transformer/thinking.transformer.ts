@@ -145,6 +145,20 @@ const modelThinkingConfigs: ModelThinkingConfig[] = [
       delete request.reasoning;
     },
   },
+
+  // Kimi/Moonshot models - use reasoning boolean
+  {
+    pattern: /^kimi-|^moonshot/i,
+    configureThinking: (request, reasoning) => {
+      // Kimi uses reasoning field for thinking mode
+      if (reasoning.effort !== "low") {
+        request.reasoning = true;
+      }
+    },
+    configureNonThinking: (request) => {
+      delete request.reasoning;
+    },
+  },
 ];
 
 /**

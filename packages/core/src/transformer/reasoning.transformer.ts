@@ -93,7 +93,6 @@ export class ReasoningTransformer implements Transformer {
             if (line.startsWith("data: ") && line.trim() !== "data: [DONE]") {
               try {
                 const data = JSON.parse(line.slice(6));
-                console.log(JSON.stringify(data))
 
                 // Extract reasoning_content from delta
                 if (data.choices?.[0]?.delta?.reasoning_content) {
@@ -133,13 +132,15 @@ export class ReasoningTransformer implements Transformer {
                   const signature = Date.now().toString();
 
                   // Create a new chunk with thinking block
+                  // We copy all delta fields except tool_calls to avoid duplication
+                  const { tool_calls, reasoning_content, ...deltaFields } = data.choices[0].delta || {};
                   const thinkingChunk = {
                     ...data,
                     choices: [
                       {
                         ...data.choices[0],
                         delta: {
-                          ...data.choices[0].delta,
+                          ...deltaFields,
                           content: null,
                           thinking: {
                             content: context.reasoningContent(),
@@ -149,7 +150,6 @@ export class ReasoningTransformer implements Transformer {
                       },
                     ],
                   };
-                  delete thinkingChunk.choices[0].delta.reasoning_content;
                   // Send the thinking chunk
                   const thinkingLine = `data: ${JSON.stringify(
                     thinkingChunk
@@ -162,13 +162,11 @@ export class ReasoningTransformer implements Transformer {
                 }
 
                 // Send the modified chunk
-                if (
-                  data.choices?.[0]?.delta &&
-                  Object.keys(data.choices[0].delta).length > 0
-                ) {
-                  if (context.isReasoningComplete()) {
-                    data.choices[0].index++;
-                  }
+                // Important: Always send if there are tool_calls, even if deltaFields is empty
+                const hasToolCalls = data.choices?.[0]?.delta?.tool_calls && data.choices[0].delta.tool_calls.length > 0;
+                const hasDeltaFields = data.choices?.[0]?.delta && Object.keys(deltaFields).length > 0;
+
+                if (hasToolCalls || hasDeltaFields) {
                   const modifiedLine = `data: ${JSON.stringify(data)}\n\n`;
                   controller.enqueue(encoder.encode(modifiedLine));
                 }
