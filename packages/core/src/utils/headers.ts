@@ -11,7 +11,6 @@ export interface HeaderContext {
 export class HeaderManager {
   private static readonly DEFAULT_HEADERS: Record<string, string> = {
     "Content-Type": "application/json",
-    Accept: "application/json",
   };
 
   private static readonly PROVIDER_HEADERS: Record<

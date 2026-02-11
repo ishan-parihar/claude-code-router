@@ -248,7 +248,7 @@ async function getServer(options: RunOptions = {}) {
     event.emit('onError', request, reply, error);
   })
   serverInstance.addHook("onSend", (req: any, reply: any, payload: any, done: any) => {
-    if (req.sessionId && req.pathname.endsWith("/v1/messages")) {
+    if (req.sessionId && req.pathname?.endsWith("/v1/messages")) {
       if (payload instanceof ReadableStream) {
         if (req.agents) {
           const abortController = new AbortController();

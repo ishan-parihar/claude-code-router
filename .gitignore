@@ -10,3 +10,4 @@ tsconfig.tsbuildinfo
 # Documentation build output
 docs/build
 docs/.docusaurus
+/.pnpm-store
