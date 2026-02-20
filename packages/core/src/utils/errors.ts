@@ -111,9 +111,10 @@ export const PROVIDER_ERROR_MAPS: Record<
     },
     "406": {
       code: "not_acceptable",
-      message: "Not Acceptable (likely signature or header format rejected)",
+      message: "Not Acceptable (likely signature or header format rejected) - will retry with fresh signature",
       statusCode: 406,
-      isRetryable: false,
+      isRetryable: true,
+      retryAfter: 100,
       provider: "iflow",
     },
     "500": {
@@ -206,9 +207,12 @@ export class ProviderErrorHandler {
     errorBody: any,
     providerType?: string
   ): ProviderError {
-    const lookupKey = providerType
+    const rawLookupKey = providerType
       ? providerType.toLowerCase()
       : provider.toLowerCase();
+    
+    // Normalize variant keys (e.g., iflowA, iflowX) to base 'iflow'
+    const lookupKey = rawLookupKey.startsWith("iflow") ? "iflow" : rawLookupKey;
 
     const errorMap = PROVIDER_ERROR_MAPS[lookupKey];
 

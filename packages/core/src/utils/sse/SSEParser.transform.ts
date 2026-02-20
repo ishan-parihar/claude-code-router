@@ -61,7 +61,19 @@ export class SSEParserTransform extends TransformStream<string, any> {
         if (line.startsWith('event:')) {
             this.currentEvent.event = line.slice(6).trim();
         } else if (line.startsWith('data:')) {
-            const data = line.slice(5).trim();
+            let data = line.slice(5).trim();
+            
+            // Handle case where SSE comment (like :ping) got concatenated to data
+            // This can happen if a heartbeat was sent without proper line separation
+            const commentIndex = data.indexOf('\n:');
+            if (commentIndex === -1) {
+                // Also check for :ping at the end of the line (no newline)
+                const pingIndex = data.indexOf(':ping');
+                if (pingIndex !== -1) {
+                    data = data.substring(0, pingIndex).trim();
+                }
+            }
+            
             if (data === '[DONE]') {
                 this.currentEvent.data = { type: 'done' };
             } else {

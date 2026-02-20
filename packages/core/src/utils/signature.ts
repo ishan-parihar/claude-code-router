@@ -18,17 +18,21 @@ export class RequestSigner {
     const timestampMs = Date.now();
     const timestamp = timestampMs.toString();
     
+    // Create a copy of headers to avoid mutating the input
+    // This is critical for parallel requests that might share header references
+    const signedHeaders: Record<string, string> = { ...headers };
+    
     // Ensure session-id header exists for iflow
     if (this.config.headerName === 'x-iflow-signature') {
-      if (!headers['session-id']) {
-        headers['session-id'] = '';
+      if (!signedHeaders['session-id']) {
+        signedHeaders['session-id'] = '';
       }
     }
     
-    const signature = this.generateSignature(headers, body, timestamp);
+    const signature = this.generateSignature(signedHeaders, body, timestamp);
 
     return {
-      ...headers,
+      ...signedHeaders,
       [this.config.headerName]: signature,
       [this.config.timestampHeader]: timestamp,
     };
@@ -66,25 +70,35 @@ export class RequestSigner {
     // iflow-cli compatible signature format
     // Format: "user-agent:session-id:timestamp" (exactly as iflow-cli)
     // apiKey is ONLY used as HMAC key, NOT in the data
-    const fieldValues = this.config.fields.map((field) => {
-      const key = Object.keys(headers).find(
-        (k) => k.toLowerCase() === field.toLowerCase()
-      );
-      return key ? headers[key] : "";
-    });
 
-    const data = [...fieldValues, timestamp].join(":");
+    // For iflow, we use fixed fields: user-agent, session-id, and the timestamp
+    // Use case-insensitive lookup for headers to be safe
+    const findHeader = (name: string) => {
+      const key = Object.keys(headers).find(k => k.toLowerCase() === name.toLowerCase());
+      return key ? headers[key] : undefined;
+    };
+
+    const userAgent = findHeader("user-agent") || "iFlow-Cli";
+    const sessionId = findHeader("session-id") || "";
     
-    // Debug logging for iflow signature
+    const data = `${userAgent}:${sessionId}:${timestamp}`;
+
+    // Detailed diagnostic logging for iflow signature
     if (this.config.headerName === 'x-iflow-signature') {
-      console.log(`[Signature Debug] Generating signature for iflow:`);
-      console.log(`[Signature Debug] Data: "${data}"`);
-      console.log(`[Signature Debug] Timestamp: ${timestamp}`);
-      console.log(`[Signature Debug] Fields: ${JSON.stringify(fieldValues)}`);
-      console.log(`[Signature Debug] Headers keys: ${Object.keys(headers).join(', ')}`);
+      console.log(`[DIAGNOSTIC] iflow Signature Generation:`);
+      console.log(`  - Data String: "${data}"`);
+      console.log(`  - user-agent:  "${userAgent}"`);
+      console.log(`  - session-id:  "${sessionId}"`);
+      console.log(`  - timestamp:   "${timestamp}"`);
     }
 
-    return crypto.createHmac("sha256", this.apiKey).update(data, "utf8").digest("hex");
+    const signature = crypto.createHmac("sha256", this.apiKey).update(data, "utf8").digest("hex");
+    
+    if (this.config.headerName === 'x-iflow-signature') {
+      console.log(`  - Signature:   "${signature.substring(0, 8)}..."`);
+    }
+
+    return signature;
   }
 
   verify(
@@ -137,9 +151,11 @@ export function getSignerForProvider(
   apiKey: string,
   providerType?: string
 ): RequestSigner | null {
-  const lookupKey = providerType 
-    ? providerType.toLowerCase() 
-    : providerName.toLowerCase();
+  const name = providerName.toLowerCase();
+  const type = providerType?.toLowerCase();
+  
+  const isIflow = name.startsWith('iflow') || type?.startsWith('iflow');
+  const lookupKey = isIflow ? 'iflow' : (type || name);
     
   const config = PROVIDER_SIGNATURES[lookupKey];
   if (!config) {
@@ -150,11 +166,14 @@ export function getSignerForProvider(
 
 // Check if provider requires signing
 export function providerRequiresSigning(providerName: string, providerType?: string): boolean {
-  const lookupKey = providerType 
-    ? providerType.toLowerCase() 
-    : providerName.toLowerCase();
+  const name = providerName.toLowerCase();
+  const type = providerType?.toLowerCase();
+  
+  if (name.startsWith('iflow') || type?.startsWith('iflow')) {
+    return true;
+  }
     
-  return lookupKey in PROVIDER_SIGNATURES;
+  return (type || name) in PROVIDER_SIGNATURES;
 }
 
 export default RequestSigner;

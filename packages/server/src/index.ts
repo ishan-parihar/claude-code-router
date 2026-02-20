@@ -11,9 +11,9 @@ import {
   sessionUsageCache,
   SSEParserTransform,
   SSESerializerTransform,
-  rewriteStream
+  rewriteStream,
+  HeartbeatInjectorTransform
 } from "@ishan-parihar/llms";
-import { HeartbeatInjectorTransform } from "@ishan-parihar/llms/dist/utils/sse";
 import JSON5 from "json5";
 import { IAgent, ITool } from "./agents/type";
 import agentsManager from "./agents";

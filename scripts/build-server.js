@@ -16,16 +16,8 @@ try {
     fs.mkdirSync(distDir, { recursive: true });
   }
 
-  // Generate type declaration files
-  console.log('Generating type declaration files...');
-  execSync('npx tsc --emitDeclarationOnly', {
-    stdio: 'inherit',
-    cwd: serverDir
-  });
-
   // Build the server application
   console.log('Building server application...');
-  // 使用 minify 和 tree-shaking 优化体积
   const esbuildPath = path.join(rootDir, 'node_modules', '.bin', 'esbuild');
   execSync(`${esbuildPath} src/index.ts --bundle --platform=node --minify --tree-shaking=true --outfile=dist/index.js`, {
     stdio: 'inherit',

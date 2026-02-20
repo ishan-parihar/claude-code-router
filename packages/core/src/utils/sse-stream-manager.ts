@@ -14,7 +14,7 @@ export interface SSEStreamManagerOptions {
   /** Enable keepalive heartbeat (default: true) */
   enableKeepalive?: boolean;
   /** Backpressure timeout in milliseconds (default: 10000) */
-  backpressureTimeoutMs?: number;
+  backpressureTimeoutMs?: number; // (default: 60000)
   /** Maximum idle time before considering connection dead (default: 120000) */
   maxIdleTimeMs?: number;
   /** Enable staggered streaming detection (default: true) */
@@ -132,7 +132,9 @@ export class SSEStreamManager {
       if (idleTime >= interval * 0.9) {
         heartbeatInFlight = true;
         try {
-          const success = await this.write(':ping\n\n');
+          // Send heartbeat without updating activity timestamps
+          // to prevent interfering with data chunk tracking
+          const success = await this.sendHeartbeat();
           if (!success) this.stopHeartbeat();
         } catch {
           this.stopHeartbeat();
@@ -141,6 +143,71 @@ export class SSEStreamManager {
         }
       }
     }, interval);
+  }
+
+  /**
+   * Send a heartbeat ping without updating activity timestamps
+   * This prevents the heartbeat from interfering with data chunk boundaries
+   */
+  private async sendHeartbeat(): Promise<boolean> {
+    if (!this.isConnected) {
+      return false;
+    }
+
+    // Don't update lastActivity or lastChunkTime for heartbeats
+    // This ensures heartbeats don't interfere with data chunk tracking
+
+    // Handle Web Stream Controller
+    if (this.controller) {
+      const chunk = new TextEncoder().encode(':ping\n\n');
+      return enqueueWithBackpressure(
+        this.controller,
+        chunk,
+        this.options.backpressureTimeoutMs
+      );
+    }
+
+    // Handle Node.js Writable Stream
+    if (this.raw) {
+      if ((this.raw as any).writableEnded) {
+        return false;
+      }
+
+      return new Promise((resolve) => {
+        let resolved = false;
+        const safeResolve = (value: boolean) => {
+          if (!resolved) {
+            resolved = true;
+            resolve(value);
+          }
+        };
+
+        const canContinue = this.raw!.write(':ping\n\n', (err) => {
+          if (err) {
+            console.error('[SSEStreamManager] Heartbeat write error:', err);
+            this.isConnected = false;
+            safeResolve(false);
+          } else {
+            safeResolve(true);
+          }
+        });
+
+        // Handle backpressure
+        if (!canContinue) {
+          const timeout = setTimeout(() => {
+            console.warn('[SSEStreamManager] Heartbeat backpressure timeout');
+            safeResolve(false);
+          }, this.options.backpressureTimeoutMs || 60000);
+
+          this.raw!.once('drain', () => {
+            clearTimeout(timeout);
+            safeResolve(true);
+          });
+        }
+      });
+    }
+
+    return false;
   }
 
   /**
@@ -280,7 +347,7 @@ export class SSEStreamManager {
           const timeout = setTimeout(() => {
             console.warn('[SSEStreamManager] Backpressure timeout');
             safeResolve(false);
-          }, this.options.backpressureTimeoutMs || 10000);
+          }, this.options.backpressureTimeoutMs || 60000);
 
           this.raw!.once('drain', () => {
             clearTimeout(timeout);
@@ -418,7 +485,7 @@ export async function readWithTimeout<T>(
 export async function enqueueWithBackpressure<T>(
   controller: ReadableStreamDefaultController<T>,
   data: T,
-  maxWaitMs: number = 10000
+  maxWaitMs: number = 60000
 ): Promise<boolean> {
   const startTime = Date.now();
 

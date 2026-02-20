@@ -109,11 +109,27 @@ export class ProviderService {
         // Auto-detect provider type from URL if not explicitly set
         const providerType = providerConfig.type || this.detectProviderType(providerConfig.api_base_url);
 
+
+        let apiKeys: string[] = [];
+        if (Array.isArray(providerConfig.api_key)) {
+          apiKeys = providerConfig.api_key;
+        } else if (typeof providerConfig.api_key === 'string') {
+          // Check if it's comma-separated
+          apiKeys = providerConfig.api_key.split(',').map(k => k.trim()).filter(k => k.length > 0);
+        }
+
+        if (apiKeys.length === 0) {
+          this.logger.error(`No valid API keys found for provider ${providerConfig.name}`);
+          return;
+        }
+
         this.registerProvider({
           name: providerConfig.name,
           type: providerType,
           baseUrl: providerConfig.api_base_url,
-          apiKey: providerConfig.api_key,
+          apiKey: apiKeys[0], // backward compatibility
+          apiKeys: apiKeys,
+          currentKeyIndex: 0,
           models: providerConfig.models || [],
           headers: providerConfig.headers,
           transformer: providerConfig.transformer ? transformer : undefined,
@@ -157,6 +173,16 @@ export class ProviderService {
 
   getProvider(name: string): LLMProvider | undefined {
     return this.providers.get(name);
+  }
+
+  getProviderForRequest(name: string): LLMProvider | undefined {
+    const provider = this.providers.get(name);
+    if (!provider) return undefined;
+    
+    return {
+      ...provider,
+      apiKey: this.getNextApiKey(name)
+    };
   }
 
   updateProvider(
@@ -273,6 +299,17 @@ export class ProviderService {
     }
 
     return transformerConfig;
+  }
+
+  getNextApiKey(providerName: string): string {
+    const provider = this.providers.get(providerName);
+    if (!provider || !provider.apiKeys || provider.apiKeys.length === 0) {
+      return provider ? provider.apiKey : "";
+    }
+    
+    const key = provider.apiKeys[provider.currentKeyIndex || 0];
+    provider.currentKeyIndex = ((provider.currentKeyIndex || 0) + 1) % provider.apiKeys.length;
+    return key;
   }
 
   async getAvailableModels(): Promise<{

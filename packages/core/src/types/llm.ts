@@ -202,6 +202,8 @@ export interface LLMProvider {
   type?: string;
   baseUrl: string;
   apiKey: string;
+  apiKeys: string[];
+  currentKeyIndex?: number;
   models: string[];
   headers?: Record<string, string>;
   transformer?: {
@@ -231,7 +233,7 @@ export interface ConfigProvider {
   name: string;
   type?: string;
   api_base_url: string;
-  api_key: string;
+  api_key: string | string[];
   models: string[];
   headers?: Record<string, string>;
   transformer: {

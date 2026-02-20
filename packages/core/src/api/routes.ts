@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import {
   FastifyInstance,
   FastifyPluginAsync,
@@ -183,7 +184,7 @@ async function handleSinglePath(
     `[Routes] Starting single path execution (requestId: ${requestId}, provider: ${req.provider}, model: ${body.model})`
   );
 
-  const provider = fastify.providerService.getProvider(req.provider!);
+  const provider = fastify.providerService.getProviderForRequest(req.provider!);
   if (!provider) {
     req.log.error(
       `[Routes] Provider not found (requestId: ${requestId}, provider: ${req.provider})`
@@ -299,7 +300,7 @@ async function handleSinglePath(
           const retryResponse = await sendRequestToProvider(
             body,
             {},
-            fastify.providerService.getProvider(req.provider!),
+            fastify.providerService.getProviderForRequest(req.provider!),
             fastify,
             false,
             transformer,
@@ -419,7 +420,7 @@ async function handleEndpointQueuedRequest(
       req.provider = selectedProviderName;
 
       try {
-        const provider = fastify.providerService.getProvider(selectedProviderName);
+        const provider = fastify.providerService.getProviderForRequest(selectedProviderName);
         if (!provider) {
           throw createApiError(
             `Provider '${selectedProviderName}' not found`,
@@ -484,7 +485,7 @@ async function handleEndpointQueuedRequest(
               const retryResponse = await sendRequestToProvider(
                 body,
                 {},
-                fastify.providerService.getProvider(selectedProviderName),
+                fastify.providerService.getProviderForRequest(selectedProviderName),
                 fastify,
                 false,
                 transformer,
@@ -582,7 +583,7 @@ async function handleQueuedRequest(
       fastify.modelPoolManager.confirmSlot(req.provider!, body.model, `${requestId}-queue`);
 
       try {
-        const provider = fastify.providerService.getProvider(req.provider!);
+        const provider = fastify.providerService.getProviderForRequest(req.provider!);
 
         const { requestBody, config, bypass } = await processRequestTransformers(
           body,
@@ -625,7 +626,7 @@ async function handleQueuedRequest(
               const retryResponse = await sendRequestToProvider(
                 body,
                 {},
-                fastify.providerService.getProvider(req.provider!),
+                fastify.providerService.getProviderForRequest(req.provider!),
                 fastify,
                 false,
                 transformer,
@@ -734,7 +735,7 @@ req.log.info(
         `[Routes] Parallel attempt: ${candidate.provider},${candidate.model} (requestId: ${requestId}, isPrimary: ${candidate.isPrimary})`
       );
 
-      const provider = fastify.providerService.getProvider(candidate.provider);
+      const provider = fastify.providerService.getProviderForRequest(candidate.provider);
       if (!provider) {
         return {
           success: false,
@@ -747,10 +748,30 @@ req.log.info(
       const newBody = { ...(req.body as any) };
       newBody.model = candidate.model;
 
+      // Ensure each parallel candidate has a unique session ID if it's an iflow provider
+      // This prevents multiple parallel requests from interfering with each other's iflow sessions
+      let sessionContext = req.sessionContext;
+      const isIflowCandidate = candidate.provider.toLowerCase().startsWith("iflow") || 
+                               provider.type?.toLowerCase()?.startsWith("iflow");
+      if (isIflowCandidate) {
+        const baseSessionId = req.sessionContext?.sessionId || req.sessionId || requestId;
+        const baseConversationId = req.sessionContext?.conversationId || req.conversationId || requestId;
+        
+        // Use a purely random suffix for maximum entropy and minimal length
+        const isolationSuffix = Math.random().toString(36).substring(2, 10);
+
+        sessionContext = {
+          ...req.sessionContext,
+          sessionId: `${baseSessionId}-${isolationSuffix}`,
+          conversationId: `${baseConversationId}-${isolationSuffix}`,
+        };
+      }
+
       const newReq = {
         ...req,
         provider: candidate.provider,
         body: newBody,
+        sessionContext,
       };
 
       const { requestBody, config, bypass } = await processRequestTransformers(
@@ -998,7 +1019,7 @@ async function tryAlternativesParallel(
     const reservationId = `${requestId}-failover-${alternative.provider}-${alternative.model}`;
 
     try {
-      const provider = fastify.providerService.getProvider(alternative.provider);
+      const provider = fastify.providerService.getProviderForRequest(alternative.provider);
       if (!provider) {
         return { success: false, provider: alternative.provider, model: alternative.model, reason: 'provider_not_found' };
       }
@@ -1151,7 +1172,24 @@ async function processRequestTransformers(
     } else {
       delete headers["content-length"];
     }
-    config.headers = headers;
+    // Filter out headers that we manage ourselves to avoid duplicates
+    // These headers are set by HeaderManager and should not come from incoming requests
+    const managedHeaders = ['accept', 'content-type', 'authorization', 'user-agent', 'x-client-type', 'x-client-version', 'session-id', 'conversation-id', 'x-request-id'];
+    const filteredHeaders: Record<string, string> = {};
+    if (headers instanceof Headers) {
+      headers.forEach((value, key) => {
+        if (!managedHeaders.includes(key.toLowerCase())) {
+          filteredHeaders[key] = value;
+        }
+      });
+    } else {
+      for (const [key, value] of Object.entries(headers)) {
+        if (!managedHeaders.includes(key.toLowerCase())) {
+          filteredHeaders[key] = value;
+        }
+      }
+    }
+    config.headers = filteredHeaders;
   }
 
   if (!bypass && typeof transformer.transformRequestOut === "function") {
@@ -1228,6 +1266,8 @@ async function sendRequestToProvider(
   transformer: any,
   context: any
 ) {
+
+
   const url = config.url || new URL(provider.baseUrl);
 
   if (bypass && typeof transformer.auth === "function") {
@@ -1260,43 +1300,76 @@ async function sendRequestToProvider(
     console.log(`[iflow Debug] Applied glm-4.7 specific settings: temperature=1, top_p=0.95`);
   }
 
-  // Build headers using HeaderManager
-  // Use sessionContext for session tracking (set by session middleware)
-  const headerContext = {
-    provider: provider.name,
-    providerType: provider.type,
-    model: requestBody.model,
-    sessionId: context.req?.sessionContext?.sessionId,
-    conversationId: context.req?.sessionContext?.conversationId,
-    requestId: context.req?.sessionContext?.requestId || context.req?.id,
-    isStream: requestBody.stream === true,
-  };
-
-  let requestHeaders = HeaderManager.buildRequestHeaders(
-    provider.apiKey,
-    provider.name,
-    headerContext,
-    { ...provider.headers, ...config?.headers }
-  );
-
-  // Apply request signing if provider requires it
-  if (providerRequiresSigning(provider.name, provider.type)) {
-    const signer = getSignerForProvider(provider.name, provider.apiKey, provider.type);
-    if (signer) {
-      requestHeaders = signer.sign(requestHeaders, requestBody);
-      fastify.log.debug(
-        `[Request Signing] Applied signing for provider ${provider.name}`
-      );
-    }
-  }
-
   // Ensure iflow URLs have the correct path
   if ((provider.name === 'iflow' || provider.type === 'iflow') && !url.pathname.endsWith('/chat/completions')) {
     url.pathname = url.pathname.replace(/\/$/, '') + '/chat/completions';
   }
 
+  // Helper function to generate fresh headers with fresh signature
+  // This is called on each retry attempt to ensure valid signatures
+  const generateRequestHeaders = () => {
+    // Build header context dynamically to pick up isolated session IDs from parallel runner
+    const currentSessionCtx = context.req?.sessionContext;
+    const dynamicHeaderContext = {
+      provider: provider.name,
+      providerType: provider.type,
+      model: requestBody.model,
+      sessionId: currentSessionCtx?.sessionId || context.req?.sessionId || context.req?.sessionContext?.sessionId,
+      conversationId: currentSessionCtx?.conversationId || context.req?.conversationId || context.req?.sessionContext?.conversationId,
+      requestId: currentSessionCtx?.requestId || context.req?.id,
+      isStream: requestBody.stream === true,
+    };
+
+    console.log(`[DIAGNOSTIC] dynamicHeaderContext for ${provider.name}:`, JSON.stringify(dynamicHeaderContext, null, 2));
+
+    // Filter config headers (from transformer) to remove conflicting/unwanted headers
+    const configHeaders = config?.headers || {};
+    const filteredConfigHeaders: Record<string, string> = {};
+    
+    // List of headers that we manage explicitly or want to exclude
+    const excludedHeaders = [
+      'content-type', 'content-length', 'accept', 
+      'authorization', 'host', 'connection',
+      'user-agent', 'x-client-type', 'x-client-version',
+      'session-id', 'conversation-id', 'x-request-id',
+      // Exclude x-api-key for iflow as it uses Bearer token
+      'x-api-key'
+    ];
+
+    Object.entries(configHeaders).forEach(([key, value]) => {
+      if (value && !excludedHeaders.includes(key.toLowerCase())) {
+        filteredConfigHeaders[key] = value as string;
+      }
+    });
+
+    let headers = HeaderManager.buildRequestHeaders(
+      provider.apiKey,
+      provider.name,
+      dynamicHeaderContext,
+      { ...provider.headers, ...filteredConfigHeaders }
+    );
+
+    // Apply request signing if provider requires it
+    if (providerRequiresSigning(provider.name, provider.type)) {
+      const signer = getSignerForProvider(provider.name, provider.apiKey, provider.type);
+      if (signer) {
+        headers = signer.sign(headers, requestBody);
+      }
+    }
+
+    if (provider.name.toLowerCase().startsWith('iflow') || provider.type?.toLowerCase()?.startsWith('iflow')) {
+      context.req?.log?.info({ iflowHeaders: headers, iflowContext: dynamicHeaderContext }, `[iflow Debug] Generated headers for ${provider.name}`);
+    }
+
+    return headers;
+  };
+
+  // Initial headers for first attempt
+  let requestHeaders = generateRequestHeaders();
+
   // Debug logging for iflow provider - log full request details
-  if (provider.name === 'iflow' || provider.type === 'iflow') {
+  const isIflowProvider = provider.name.toLowerCase().startsWith('iflow') || provider.type?.toLowerCase()?.startsWith('iflow');
+  if (isIflowProvider) {
     const debugInfo = {
       url: url.toString(),
       pathname: url.pathname,
@@ -1311,9 +1384,9 @@ async function sendRequestToProvider(
       body: requestBody
     };
     
-    console.error('[iflow DEBUG] ======================================');
-    console.error('[iflow DEBUG] REQUEST DETAILS');
-    console.error('[iflow DEBUG] ======================================');
+    console.error(`[iflow DEBUG] ======================================`);
+    console.error(`[iflow DEBUG] REQUEST DETAILS FOR ${provider.name}`);
+    console.error(`[iflow DEBUG] ======================================`);
     console.error('[iflow DEBUG] URL:', debugInfo.url);
     console.error('[iflow DEBUG] Headers:', JSON.stringify(debugInfo.headers, null, 2));
     console.error('[iflow DEBUG] Body:', JSON.stringify(debugInfo.body, null, 2));
@@ -1335,28 +1408,48 @@ async function sendRequestToProvider(
   const response = await executeWithRetry(
     provider.name,
     async () => {
+      // Generate fresh headers with fresh signature for each retry attempt
+      // This ensures the timestamp in the signature is always valid
+      const freshHeaders = generateRequestHeaders();
+      
       const res = await sendUnifiedRequest(
         url,
         requestBody,
         {
           httpsProxy: fastify.configService.getHttpsProxy(),
           ...config,
-          headers: JSON.parse(JSON.stringify(requestHeaders)),
+          headers: freshHeaders,
         },
         context,
         fastify.log
       );
 
-        if (!res.ok) {
+      if (!res.ok) {
         const errorText = await res.text();
 
         // Debug logging for iflow provider errors
-        if (provider.name === 'iflow' || provider.type === 'iflow') {
-          console.error(`[iflow Debug] ========== ERROR RESPONSE ==========`);
+        if (isIflowProvider) {
+          const diagnosticInfo = {
+            status: res.status,
+            provider: provider.name,
+            headers: freshHeaders,
+            bodySnippet: JSON.stringify(requestBody).substring(0, 500) + '...',
+            errorResponse: errorText
+          };
+          
+          console.error(`[iflow Debug] ========== ERROR RESPONSE FOR ${provider.name} ==========`);
           console.error(`[iflow Debug] Status: ${res.status}`);
-          console.error(`[iflow Debug] Headers: ${JSON.stringify(Object.fromEntries(res.headers.entries()), null, 2)}`);
-          console.error(`[iflow Debug] Body: ${errorText}`);
+          console.error(`[iflow Debug] Diagnostic Info: ${JSON.stringify(diagnosticInfo, null, 2)}`);
           console.error(`[iflow Debug] ======================================`);
+          
+          if (res.status === 406) {
+            throw createApiError(
+              `Error from ${provider.name}: Not Acceptable (likely signature or header format rejected). ` +
+              `DIAGNOSTIC: ${JSON.stringify(diagnosticInfo)}`,
+              406,
+              "not_acceptable",
+            );
+          }
         }
 
         let errorBody: any;
@@ -1496,8 +1589,9 @@ async function formatResponse(
   // Read streaming configuration
   const streamingConfig = config?.streaming || {};
   const heartbeatIntervalMs = streamingConfig.sseHeartbeatIntervalMs || 30000;
-  const enableKeepalive = streamingConfig.sseEnableKeepalive !== false;
-  const backpressureTimeoutMs = streamingConfig.sseBackpressureTimeoutMs || 10000;
+  const isIflow = ((retryContext?.provider as string)?.startsWith("iflow") || (req.provider as string)?.startsWith("iflow"));
+  const enableKeepalive = isIflow ? false : (streamingConfig.sseEnableKeepalive !== false);
+  const backpressureTimeoutMs = streamingConfig.sseBackpressureTimeoutMs || 60000;
   const enableStaggeredDetection = streamingConfig.sseEnableStaggeredDetection !== false;
   const maxInterChunkDelayMs = streamingConfig.sseMaxInterChunkDelayMs || 10000;
   const minTokenRate = streamingConfig.sseMinTokenRate || 1;
@@ -1505,12 +1599,12 @@ async function formatResponse(
   // Scenario-aware read timeouts
   const scenarioTimeouts: Record<string, number> = {
     think: 300000,      // 5 minutes for reasoning models
-    default: 120000,    // 2 minutes for default (covers reasoning models on default route)
+    default: 180000,    // 2 minutes for default (covers reasoning models on default route)
     longContext: 180000, // 3 minutes for long context
     background: 120000,  // 2 minutes for background tasks
     webSearch: 120000,   // 2 minutes for web search
   };
-  const readTimeoutMs = (scenarioType && scenarioTimeouts[scenarioType]) || streamingConfig.sseReadTimeoutMs || 60000;
+  const readTimeoutMs = (scenarioType && scenarioTimeouts[scenarioType]) || streamingConfig.sseReadTimeoutMs || 180000;
 
   // Max stream retries for connection errors
   const maxStreamRetries = streamingConfig.sseMaxRetries || 2;
@@ -1768,7 +1862,15 @@ export const registerApiRoutes = async (
       request: FastifyRequest<{ Body: RegisterProviderRequest }>,
       reply: FastifyReply
     ) => {
-      const { name, baseUrl, apiKey, models } = request.body;
+      const { name, baseUrl, apiKey, apiKeys, models } = request.body;
+
+      // Handle api_key / apiKeys backward compatibility
+      let finalApiKeys: string[] = [];
+      if (apiKeys && Array.isArray(apiKeys) && apiKeys.length > 0) {
+        finalApiKeys = apiKeys;
+      } else if (apiKey && typeof apiKey === 'string') {
+        finalApiKeys = apiKey.split(',').map(k => k.trim()).filter(k => k.length > 0);
+      }
 
       if (!name?.trim()) {
         throw createApiError(
@@ -1786,9 +1888,14 @@ export const registerApiRoutes = async (
         );
       }
 
-      if (!apiKey?.trim()) {
+      if (finalApiKeys.length === 0) {
         throw createApiError("API key is required", 400, "invalid_request");
       }
+      
+      // Update body with final parsed keys
+      request.body.apiKey = finalApiKeys[0];
+      request.body.apiKeys = finalApiKeys;
+      request.body.currentKeyIndex = 0;
 
       if (!models || !Array.isArray(models) || models.length === 0) {
         throw createApiError(
